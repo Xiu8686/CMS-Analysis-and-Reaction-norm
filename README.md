@@ -1,2 +1,2 @@
 # CMS-Analysis-and-Reaction-norm
-The Analysis of CMS chanllenge data
+The analysis of CMS chanllenge data
