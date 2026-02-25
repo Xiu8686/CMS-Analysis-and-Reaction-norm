@@ -1,0 +1,59 @@
+---
+title: "Reacnorm Package"
+author: "Junxiu Gao"
+date: "2026-02-25"
+output: html_document
+---
+
+# Reacnorm Package
+
+```{r}
+# install.packages("Reacnorm")
+library(Reacnorm)
+library(tidyr)
+library(dplyr)
+library(purrr)
+library(forcats)
+library(ggplot2)
+library(brms)
+seed <- 777
+set.seed(seed)
+```
+
+Data we use:
+
+```{r}
+head(dragon_discrete, 20)
+data_dis <- dragon_discrete
+```
+
+```{r}
+ggplot(dragon_discrete) + 
+    geom_line(aes(x = Name_Env, y = Aggressiveness, group = Individual, colour = Individual)) +
+    geom_point(aes(x = Name_Env, y = Aggressiveness, group = Individual, colour = Individual)) + 
+    theme(legend.position = "none") + 
+    xlab("Temperature") + 
+    ylab("Aggressiveness")
+```
+
+```{r}
+tbl_dragon_ds <- dragon_discrete |>
+  mutate(
+    Env_num = as.integer(sub("Env_", "", Name_Env)),  
+    Env_c   = Env_num - mean(Env_num, na.rm = TRUE),
+    Env_Sq  = Env_c^2
+  )
+```
+
+## Fitting a quadratic reaction norm to the data
+
+```{r}
+n_chains <- 4
+n_iter <- 3000
+n_warm <- 1000
+n_thin <- 1
+```
+
+```{r}
+form_quad <- brmsformula()
+```

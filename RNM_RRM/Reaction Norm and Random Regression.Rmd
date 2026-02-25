@@ -1,8 +1,0 @@
----
-title: "Reaction Norm and Random Regression"
-author: "Junxiu Gao"
-date: "2026-02-24"
-output: html_document
----
-
-# Random Regression model
