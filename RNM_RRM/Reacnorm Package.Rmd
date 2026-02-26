@@ -55,5 +55,42 @@ n_thin <- 1
 ```
 
 ```{r}
-form_quad <- brmsformula()
+tbl_dragon_ds <- dragon_discrete |>
+  mutate(
+    Temp_c  = Temp - mean(Temp, na.rm = TRUE),
+    Temp_Sq = Temp_c^2
+  )
+```
+
+```{r}
+tbl_dragon_ds <- dragon_discrete |>
+  mutate(
+    Temp_c  = Temp - mean(Temp, na.rm = TRUE),
+    Temp_Sq = Temp_c^2
+  )
+
+form_quad <- brms::brmsformula(
+  Aggressiveness ~ Temp_c + Temp_Sq + (1 + Temp_c + Temp_Sq | Individual)
+)
+
+
+fit_quad <- brm(
+  formula = form_quad,
+  data    = tbl_dragon_ds,
+  family  = gaussian(),
+  chains  = 4,
+  iter    = 3000,
+  warmup  = 1000,
+  thin    = 1,
+  cores   = 4,
+  seed    = 123
+)
+```
+
+```{r}
+summary(fit_quad)
+```
+
+```{r}
+plot(fit_quad)
 ```
