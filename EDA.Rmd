@@ -1,0 +1,43 @@
+---
+title: "EDA"
+author: "Junxiu"
+date: "2026-02-28"
+output: html_document
+---
+
+## Packages
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(skimr)
+library(naniar)
+library(data.table)
+```
+
+## File path
+
+```{r}
+# phenotype
+pheno_file1 <- file.path("data", "phenotype",
+                         "CMS challenge Scotland 22G BE20041B sample IDs_with PCR11102022.xlsx")
+pheno_file2 <- file.path("data", "phenotype",
+                         "Data - CMS MOWI genetics project Scotland.xlsx")
+
+# pedigree
+ped_file <- file.path("data", "pedigree",
+                      "pedigree22G_CMSSalmoStrong.txt")
+
+# genotype
+bed_file <- file.path("data", "genotype",
+                      "2022CMSGeno_SalmoStrong.bed")
+bim_file <- sub("\\.bed$", ".bim", bed_file)
+fam_file <- sub("\\.bed$", ".fam", bed_file)
+```
+
+```{r}
+excel_sheets(pheno_file1)
+excel_sheets(pheno_file2)
+
+```
