@@ -7,13 +7,15 @@ output: html_document
 
 ## Packages
 
-```{r}
+```{r warning=FALSE}
 library(tidyverse)
 library(readxl)
 library(janitor)
 library(skimr)
 library(naniar)
 library(data.table)
+library(stringr)
+
 ```
 
 ## File path
@@ -36,8 +38,219 @@ bim_file <- sub("\\.bed$", ".bim", bed_file)
 fam_file <- sub("\\.bed$", ".fam", bed_file)
 ```
 
-```{r}
-excel_sheets(pheno_file1)
-excel_sheets(pheno_file2)
+## EDA
 
+### Glimpse of the data
+
+```{r}
+pcr_pheno <- read_excel(pheno_file1, sheet = "Sheet2") %>%
+  clean_names() %>%
+  rename(
+    fish_number = fish_nunber,
+    test_replicate = test_replicate,
+    tissue_type = tissue_type,
+    reported_result = reported_result,
+    cp_1 = cp_value_8,
+    cp_2 = cp_value_9,
+    cp_3 = cp_value_10
+  ) %>%
+  mutate(
+    reported_result = as.factor(reported_result),
+    tissue_type = as.factor(tissue_type),
+    species = as.factor(species)
+  )
+```
+
+```{r}
+head(pcr_pheno, 10)
+```
+
+```{r}
+histo_pheno <- read_excel(pheno_file2, sheet = "Scotland samples", skip = 1) %>%
+  clean_names() %>%
+  rename(
+    id = id,
+    atrium_area_background = area_background_2,
+    atrium_area_inflamed = area_inflamed_tissue,
+    atrium_area_rbc = area_red_blood_cells_4,
+    atrium_area_noninflamed = area_non_inflamed_tissue_5,
+    atrium_area_investigated = area_investigated_6,
+    atrium_pct_inflam = percentage_inflammation,
+    atrium_rel_inflam = relative_area_inflammation_8,
+    spong_area_background = area_background_11,
+    spong_area_inflamed = area_inflammed_tissue,
+    spong_area_rbc = area_red_blood_cells_13,
+    spong_area_noninflamed = area_non_inflamed_tissue_14,
+    spong_area_investigated = area_investigated_15,
+    spong_pct_inflam = precentage_inflammation,
+    spong_rel_inflam = relative_area_inflammation_17,
+    ratio_inflam = ratio_inflammation_atrium_spongiosum,
+    ratio_control = ratio_controll
+  )
+```
+
+```{r}
+head(histo_pheno, 10)
+```
+
+```{r}
+glimpse(pcr_pheno)
+```
+
+```{r}
+glimpse(histo_pheno)
+```
+
+### Summary of the data
+
+```{r}
+skim(pcr_pheno)
+```
+
+```{r}
+skim(histo_pheno)
+```
+
+```{r}
+# Whether there are replicate of ID and fish number
+pcr_pheno %>% count(sample_id) %>% filter(n > 1)
+pcr_pheno %>% count(fish_number) %>% filter(n > 1)
+histo_pheno %>% count(id) %>% filter(n > 1)
+# No!
+```
+
+### Distribution of Phenotype
+
+```{r}
+pcr_pheno %>%
+  pivot_longer(cols = c(cp_1, cp_2, cp_3), names_to = "rep", values_to = "cp") %>%
+  ggplot(aes(x = cp)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~rep, scales = "free_y") +
+  theme_bw()
+
+pcr_pheno %>%
+  ggplot(aes(x = reported_result)) +
+  geom_bar(fill = "tomato") +
+  theme_bw()
+
+pcr_pheno %>%
+  ggplot(aes(x = tissue_type, fill = reported_result)) +
+  geom_bar(position = "fill") +
+  theme_bw() +
+  ylab("Proportion")
+```
+
+### Distribution of histopathology
+
+```{r}
+histo_pheno %>%
+  select(atrium_pct_inflam, spong_pct_inflam, ratio_inflam) %>%
+  pivot_longer(everything(), names_to = "trait", values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "darkseagreen3", color = "white") +
+  facet_wrap(~trait, scales = "free") +
+  theme_bw()
+```
+
+```{r}
+# Calculate cp mean, sd
+# Calculate inflam differ and mean
+
+pcr_pheno <- pcr_pheno %>%
+  mutate(
+    cp_mean = rowMeans(select(., cp_1, cp_2, cp_3), na.rm = TRUE),
+    cp_sd = apply(select(., cp_1, cp_2, cp_3), 1, sd, na.rm = TRUE)
+  )
+
+histo_pheno <- histo_pheno %>%
+  mutate(
+    inflam_diff = atrium_pct_inflam - spong_pct_inflam,
+    inflam_mean = (atrium_pct_inflam + spong_pct_inflam) / 2
+  )
+
+summary(pcr_pheno$cp_mean)
+cat("\n")
+summary(pcr_pheno$cp_sd)
+cat("\n")
+summary(histo_pheno$inflam_diff)
+```
+
+From the result above, the max of $\text{cp_sd}$ value could be 21 which is a little bit large which can be think of as outlier. Double check:
+
+```{r}
+pcr_pheno %>%
+    arrange(desc(cp_sd)) %>% 
+    select(sample_id, sample_no, cp_1, cp_2, cp_3, cp_mean, cp_sd) %>% 
+    head(20)
+    
+```
+
+We can see that $\text{sample_ID}$ which 420500 and 418601 have abnormal $\text{cp_value}$.
+
+Two proposed methods:
+
+1.  change 0 to 'NA'
+2.  See reported_result as categorical variable?
+
+Now, we look at the $\text{histo_pheno}$:
+
+```{r}
+histo_pheno %>%
+  ggplot(aes(x = inflam_diff)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  theme_bw()
+
+histo_pheno %>%
+  arrange(desc(inflam_diff)) %>%
+  select(id, atrium_pct_inflam, spong_pct_inflam, inflam_diff) %>%
+  head(50)
+
+```
+
+We notice that there are 6 NAs, now we find them:
+
+```{r}
+histo_pheno %>%
+  summarise(
+    n_missing_atrium = sum(is.na(atrium_pct_inflam)),
+    n_missing_spong = sum(is.na(spong_pct_inflam)),
+    n_missing_diff = sum(is.na(inflam_diff))
+  )
+
+histo_pheno %>%
+  filter(is.na(inflam_diff)) %>%
+  select(id, atrium_pct_inflam, spong_pct_inflam)
+```
+
+We find that 2022_0221_115, 130, 375, 383, 431, 491 are missing $\text{atrium_pct_inflam}$ value.
+
+### Join the phenotype IDs
+
+```{r}
+pcr_pheno2 <- pcr_pheno %>%
+  mutate(
+    batch = str_extract(sample_no, "\\d{4}-\\d{4}"),            
+    fish_n = as.integer(str_extract(sample_no, "(?<=-F)\\d+")), 
+    fish3  = str_pad(fish_n, width = 3, pad = "0"),            
+    id_key = paste0(str_replace_all(batch, "-", "_"), "_", fish3)  
+  )
+
+
+histo_pheno2 <- histo_pheno %>%
+  mutate(
+    batch = str_extract(id, "\\d{4}_\\d{4}"),              
+    fish_n = as.integer(str_extract(id, "(?<=_)\\d+(?=\\s*\\()")), 
+    fish3 = str_pad(fish_n, 3, pad = "0"),
+    id_key = paste0(batch, "_", fish3)
+  )
+
+pheno_joined <- pcr_pheno2 %>%
+  left_join(histo_pheno2, by = "id_key")
+```
+
+We now get the **joined form** $\text{pheno_joined}$
+
+```{r}
+head(pheno_joined, 20)
 ```
