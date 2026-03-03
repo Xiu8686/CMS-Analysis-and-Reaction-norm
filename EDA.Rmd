@@ -5,9 +5,9 @@ date: "2026-02-28"
 output: html_document
 ---
 
-## Packages
+# Packages
 
-```{r warning=FALSE}
+```{r library,warning=FALSE}
 library(tidyverse)
 library(readxl)
 library(janitor)
@@ -18,9 +18,9 @@ library(stringr)
 
 ```
 
-## File path
+# File path
 
-```{r}
+```{r path}
 # phenotype
 pheno_file1 <- file.path("data", "phenotype",
                          "CMS challenge Scotland 22G BE20041B sample IDs_with PCR11102022.xlsx")
@@ -28,17 +28,17 @@ pheno_file2 <- file.path("data", "phenotype",
                          "Data - CMS MOWI genetics project Scotland.xlsx")
 
 # pedigree
-ped_file <- file.path("data", "pedigree",
-                      "pedigree22G_CMSSalmoStrong.txt")
+ped_file <- file.path("data", "pedigree", "pedigree22G_CMSSalmoStrong.txt")
 
 # genotype
-bed_file <- file.path("data", "genotype",
-                      "2022CMSGeno_SalmoStrong.bed")
-bim_file <- sub("\\.bed$", ".bim", bed_file)
-fam_file <- sub("\\.bed$", ".fam", bed_file)
+bed_file <- file.path("data", "genotype", "2022CMSGeno_SalmoStrong.bed")
+bim_file <- file.path("data", "genotype", "2022CMSGeno_SalmoStrong.bim")
+fam_file <- file.path("data", "genotype", "2022CMSGeno_SalmoStrong.fam")
 ```
 
-## EDA
+# EDA
+
+## Phenotype
 
 ### Glimpse of the data
 
@@ -253,4 +253,23 @@ We now get the **joined form** $\text{pheno_joined}$
 
 ```{r}
 head(pheno_joined, 20)
+```
+
+## Pedigree Information
+
+```{r}
+pedigree <- read_table2(ped_file, col_types = cols(
+    id = col_character(),
+    sire = col_character(),
+    dam = col_character(),
+    sibgroup = col_character(),
+    YC = col_double()
+    ))
+```
+
+Have a look at the pedigree structure:
+
+```{r}
+head(pedigree, 20)
+tail(pedigree, 20)
 ```
