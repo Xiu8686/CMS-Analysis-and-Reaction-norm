@@ -1,0 +1,238 @@
+---
+title: "Estimated Effects for a Pre-Determined Locus"
+author: "QTL Team"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output:
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+options(width=128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This tutorial is about **estimating relevant contrasts** for the effects of a locus when it is fitted as a fixed effect in the model.
+
+We will be returning to simulated data but we will continue the egg theme. Egg shell colour is of interest and assume the breeding company tests the hens for Minolta Color L'a'b' - which is a real system of measurement. One of its components is 'lightness' L. We will also continue to use a pedigree relationship - which is easier for tutorial calculations.
+
+-   L was measured in 3 different environmental lighting conditions to get values `l1`, `l2`, and `l3`. However the breeding company used only `l1` in the selection index.
+-   When doing the measurements a calibrating variable `x0` for the machine is made for the eggs of each hen before doing measurement to help adjust for the environment.
+-   The hen population has been measured over multiple generations, `gen`.
+-   Hens lay eggs in one of 4 sheds, `lay_shed` - the same sheds and (for simplicity) assumed to have a constant effect each generation.
+-   **One of the competitors has claimed to find a causal variant, a G/C polymorphism affecting lightness!**
+-   The breeder uses conserved DNA from all the hens to genotype this locus, and an analysis is made **to see if this claim is credible!**
+-   The genotypes are described by 0, 1 and 2, which corresponds to the count of C alleles.
+
+# Setting up
+
+`qgm_helpers_t6.R` is unchanged - no new qgm_helpers.
+
+```{r}
+library("asreml")
+library("ggplot2")
+library("GGally")
+source("qgm_helpers_t6.R")
+```
+
+# Reading data and pedigree
+
+## ... data
+
+```{r}
+tut6 <- read.table("rdat6.csv", sep=",", header=TRUE, strip.white = TRUE, na.strings=c("NA"))
+head(tut6)
+```
+
+In this particular example the identities in the data and in the pedigree are identical, and the data file repeats what is in the pedigree. It is possible to obtain the pedigree `ainv` by `ainv <- ainverse(tut6[,1:3])`, i.e. there is no need to have a separate pedigree file. However in QGM, we have always kept these separate to emphasise the different roles (and potential very different sizes) that the individuals with records and the individuals with relationship information (either from pedigree or genomic) play in the models.
+
+Look at the three traits `l1`, `l2` and `l3` and `gen`
+
+```{r warning= FALSE, message= FALSE, progress= FALSE}
+ggpairs(data = tut6[,c("l1","l2","l3","gen")], diag= list(continuous= "bar", binwidth= 30), lower= list(continuous= wrap(ggally_points, size= 0.01, alpha= 0.1)))
+```
+
+### Question 1
+
+-   Q1. What observations might be made about the three traits?
+
+l1 and l2 have correlation over generations
+
+## ... and pedigree
+
+```{r}
+ped6 <- read.table("rped6.csv",sep=",",header=TRUE,strip.white = TRUE,na.strings=c("NA"))
+head(ped6)
+```
+
+### Question 2
+
+-   Q2. Explore the genetic structure of the pedigree - which is the same as the data.
+
+```{r}
+qgm_ped_summary(ped6)
+```
+
+# Setting up factors
+
+We need to set up factors for the analyses.
+
+-   In this analysis `id`, `genotype` and `lay_shed` will be used as factors: `id` in the random model, `genotype` and `lay_shed` in the fixed model.
+-   In previous tutorials we have not fitted a covariate in the models. Here `x0` will be part of the fixed model. However it is a covariate, not a factor, and it will automatically fitted as a linear regression.
+-   We will not fit an environmental time trend (e.g.`gen` in this data) in the models, although in real data this would be essential!
+    -   we assume that we have prior knowledge that there is no environmental time trend over generations in this data - which happens to be true!
+-   R is annoying in that when a column is declared as a factor, it is then hard to do further calculations with it! Therefore I am duplicating the `genotype` column for use later, `c_gen`.
+
+```{r}
+tut6$c_gen <- tut6$genotype
+tut6$genotype <- factor(tut6$genotype)
+tut6$id <- factor(tut6$id)
+tut6$lay_shed <- factor(tut6$lay_shed)
+```
+
+# Obtain inverse of A
+
+```{r}
+ainv <- ainverse(ped6[,1:3])
+```
+
+# Fitting models to `l1`
+
+## The polygenic model
+
+The appropriate model includes the polygenic additive genetic variance to account for genetic variation not explained by the G/C polymorphism. Prior to fitting the model **remember an initial interest of the study is the effect of the G/C polymorphism** and initial objectives are to estimate the additive `a` and dominance `d`.
+
+-   `a` is the contrast (-0.5, 0.0, 0.5)
+-   `d` is the contrast (-0.5, 1.0, -0.5)
+
+```{r}
+c_a <- c(-0.5, 0.0, 0.5)
+c_d <- c(-0.5, 1.0, -0.5)
+```
+
+Therefore when fitting the model, as well as looking at `qgm_summary()`, also look at the estimate of `a` for `l1` using `qgm_fixed_linear()`.
+
+```{r}
+asr <- asreml(fixed= l1 ~1 +lay_shed +x0 +genotype, random= ~vm(id,ainv), residual= ~idv(units), data= tut6)
+qgm_summary(asr)
+```
+
+```{r}
+qgm_fixed_linear(asr,"genotype",c_a)
+qgm_fixed_linear(asr,"genotype",c_d)
+```
+
+## No polygenic effect
+
+Consider the model that has no polygenic additive term.
+
+```{r}
+asr_no <- asreml(fixed= l1 ~1 +lay_shed +x0 +genotype, residual= ~idv(units), data= tut6)
+qgm_summary(asr_no)
+```
+
+```{r}
+qgm_fixed_linear(asr_no,"genotype",c_a)
+qgm_fixed_linear(asr_no,"genotype",c_d)
+```
+
+### Question 3 to 5
+
+-   Q3. What is the impact of the polygenic term on the estimates of `a` and `d`?
+
+    see the result above
+
+-   Q4. Which of these models is the better estimate of the true additive effect of the G/C polymorphism?
+
+    the polygenetic model
+
+-   Q5. What is the test statistic for a LRT of H0: polygenic $V_a$ =0 against an alternative H1: polygenic $V_a$ \>0. Is it significant at P\<0.001?
+
+```{r}
+#
+```
+
+## Contrasts estimated in the polygenic model
+
+Repeat the contrasts to obtain the estimates for `a` and `d` using the correct model.
+
+```{r}
+qgm_fixed_linear(asr,"genotype",c_a)
+qgm_fixed_linear(asr,"genotype",c_d)
+```
+
+### Questions 6 to 9
+
+-   Q6. What are the approximate d.f. for any approximate t-test involving `genotype` in the polygenic model?
+
+    ```{r}
+    qgm_summary(asr)
+    ```
+
+-   Q7. Carry out an approximate t-test with Type 1 error = 0.05, of H0: `a`=0.7 against an alternative H1: not H0. Note this is a 2-sided test.
+
+-   Q8. Repeat Q7 for testing H0: `d`=0.3 against an alternative H1: not H0 with same Type 1 error.
+
+-   Q9. The true values in the simulation were `a` = 0.7 and `d` = 0.3. Consider your answers to Q3. How well do they agree with the conclusions of Kennedy et al. given in Lecture 6?
+
+```{r}
+#
+```
+
+## More contrasts
+
+### Allele frequencies
+
+Some of the contrasts in Lecture 5, such as the effect of allelic substitution and average effects depend on the allele frequency. The allele frequency of the C allele can be calculated for a generation as below. The C allele was fixed by generation 6.
+
+```{r}
+cfreq <- data.frame(gen= numeric(length=11), p= numeric(length=11))
+for (i in 0:10) {
+  cfreq[i+1,"gen"] <- i
+  cfreq[i+1,"p"] <- mean(tut6[tut6$gen %in% c(i),"c_gen"])/2. # remember it is an allele count (0,1,2) so divide by 2!
+}
+cfreq
+```
+
+### Questions 10 to 16
+
+ASSUME for simplicity the allele frequencies for C of 0.3 in the base generation and 0.8 in generation 2 and use `qgm_fixed_linear()`.
+
+-   Q10. What is the estimated effect of an allelic substitution for allele C in the base generation?
+-   Q11. What is the estimated effect of an allelic substitution for allele C in generation 2?
+-   Q12. What would the difference in the answers for Q10 and Q11 be if the estimate of `d` was 0?
+-   Q13. What are the average effects for alleles C and G in the base?
+-   Q14. What is the contribution to the total breeding value made by the G/C polymorphism for hens `id` = 1 and `id` = 2?
+-   Q15. What are the average effects for alleles C and G in generation 2?
+-   Q16. What are the average effects for alleles C and G in generations 6 and beyond?
+
+```{r}
+#
+```
+
+# Fitting a model to `l2`
+
+There is considerable published evidence that the there is a genetic relationship between `l1` and `l2` - and the trellis plot above supports this. `l2` was not selected upon directly, but `l1` was.
+
+## Questions 17 to 20
+
+-   Q17. What is an appropriate model to estimate the effect of the G/C polymorphism on `l2`?
+-   Q18. What are the best estimates of `a` and `d` for the G/C polymorphism on `l2` when fitting the appropriate model? Note `qgm_fixed_linear()` does not deal with multivariate models so the s.e.s take extra code, so just calculate the effects for this question.
+-   Q19. The true value for `l2` is `a` = 0.2, `d` = 0. What are your conclusions? (Give a reasoned argument, no need to do a formal test, you may assume approximate s.e.s of 0.05).
+-   Q20. Confirm your earlier conclusions on bias by comparing the estimates in Q17 for `a` and `d` to those obtained when a univariate model is fitted with no polygenic additive effect.
+
+```{r}
+#
+```
+
+# Outcomes
+
+-   We have shown the bias arising from not including polygenic variation when estimating loci as fixed effects
+    -   note that fitting with fixed effects is what is done in GWAS!
+    -   hence, the importance of accounting for other polygenic variation in GWAS!
+-   We have shown biases due to selection
+-   We have used contrasts to estimate useful genetic parameters that describe the allelic effects and the contribution of the locus to breeding values.

@@ -1,0 +1,255 @@
+---
+title: "Tutorial 8: Genomic Selection & Van Raden Models (2)"
+author: "QGM Team"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+# Introduction
+In the last Tutorial we constructed Van Raden genomic relationship matrices and ran a genomic evaluation in `asreml()`. In this tutorial we will look at extracting the estimates of marker effects and see how good they were - we have the luxury of knowing the true values. We should remember that in this simulated data all the loci are unlinked and real data is more challenging. 
+
+We will be examining the distinctions between VR1 and VR2 and seeing how to move between marker effects and EBVs and using the true values of substitution effects to explore the outcomes of the analysis. In the first part we will repeat Tutorial 7 as quickly as possible. (The data used is the same but file names have had the '7' replaced by '8', but I still use 't7' for data frame names.) 
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library("asreml")
+```
+
+# QGM functions: old and new
+We add an extra function below called `qgm_solve()` which inverts a (co)variance matrix (i.e. a symmetric positive definite matrix) quicker than the standard `solve()` in R (about half the time, and with big matrices this can help!).
+
+```{r qgm_functions}
+source("qgm_helpers_t8.R")
+```
+
+# Reading genotypes
+Same genotypes as Tutorial 7.
+
+```{r}
+t7gen <- read.csv(file="rgen8.csv",header=TRUE,na.strings=c("NA"))
+loci <- c(2:501)
+aaf <- qgm_counts_to_freq(t7gen[,loci])
+```
+
+# Calculating relationship matrices
+## Van Raden 1
+
+```{r}
+W1 <- qgm_vr1_to_W(t7gen[,loci],t7gen$id,colnames(t7gen[,loci]))
+aaf <- qgm_counts_to_freq(t7gen[,loci])
+cc <- sum(2.*aaf*(1.-aaf))
+G1 <- qgm_W_to_G(W1,cc)
+G1 <- G1 + 0.001*diag(nrow(G1))
+```
+
+## Van Raden 2
+
+```{r}
+W2 <- qgm_vr2_to_W(t7gen[,loci],t7gen$id,colnames(t7gen[,loci]))
+G2 <- qgm_W_to_G(W2,length(loci))
+G2 <- G2 + 0.001*diag(nrow(G2))
+```
+
+# Reading the data
+Same data as Tutorial 7.
+
+```{r}
+t7dat <- read.csv(file="rdat8.csv",header=TRUE,na.strings=c("NA"))
+t7dat$jid <- t7dat$id # a duplicate for future use
+t7dat$id <- factor(t7dat$id,ordered=TRUE) # the factor
+```
+
+# Fitting the models
+## Van Raden 1
+
+```{r}
+asr7_1 <- asreml(fixed= phe ~ 1, random= ~vm(id,G1), residual= ~idv(units), data= t7dat )
+qgm_summary(asr7_1)
+```
+
+## Van Raden 2
+
+```{r}
+asr7_2 <- asreml(fixed= phe ~ 1, random= ~vm(id,G2), residual= ~idv(units), data= t7dat)
+qgm_summary(asr7_2)
+```
+
+# Gathering together breeding values and estimates
+The EBVs from VR1 and VR2 and their s.e.s are gathered together with `phe` and the true breeding values (TBV) in a single data frame `gbv`. 
+
+```{r}
+gbv <- qgm_random_effects(asr7_1,"id")
+colnames(gbv) <- c("ebv1","se1","z1","id")
+dum <- qgm_random_effects(asr7_2,"id")
+colnames(dum) <- c("ebv2","se2","z2","id")
+gbv <- merge(gbv,dum,by="id")
+dum <- read.csv(file="rtbv8.csv",header=TRUE,na.strings=("NA"))
+gbv <- merge(gbv,dum,by="id")
+head(gbv)
+```
+
+# True SNP effects
+As this is simulated data, we can examine the true architecture of the trait. The data were created by assigning an effect of allelic substitution for each locus $\alpha$. Therefore the difference between 2 homozygotes is $2\alpha$, and there was no dominance, so the heterozygotes were intermediate. All the loci were unlinked, the genotypes were assigned by random sampling assuming HWE frequencies and there were no fixed effects - keeping it simple.
+
+```{r}
+t8 <- read.csv(file="ralp8.csv",header=TRUE,na.strings=c("NA"),stringsAsFactors = FALSE)
+head(t8)
+tail(t8)
+```
+
+Below shows 80% of the 500 SNP have true value 0, and there are 5 large SNP segregating. 
+
+```{r}
+hist(t8$alpha,breaks=100)
+nrow(t8[t8$alpha>0.,])
+nrow(t8[t8$alpha>0.2,])
+```
+
+Attaching the allele frequency data to the data frame: `aaf` was calculated above.
+
+```{r}
+t8$aaf <- aaf
+t8$maf <- qgm_maf(aaf)
+plot(t8$aaf,t8$alpha)
+```
+
+The genic variances for each locus can be calculated assuming HWE frequencies. The total genic variance can be obtained by summing up over all loci, and the fraction contributed by the 5 large SNP can be calculated.
+
+```{r}
+t8$va <- 2*t8$aaf*(1.-t8$aaf)*t8$alpha**2.
+head(t8)
+```
+
+## Questions
+
+ * Q1. Use the code block below to calculate the total genic variance for the trait. 
+ * Q2. How much of the genic variance explained by the 5 large QTL.
+ * Q3. How well might the genic variance approximate the true genetic variance for this population?
+ * Q4. How has the SNP design increased the chances of observing a genetic signal in this small data set?
+
+```{r}
+# for use in Q1 and Q2. 
+```
+
+# Deriving the estimates of SNP effects from EBVs
+## Van Raden Model 1
+We will calculate the SNP effects for Van Raden 1 using the formulae given in the lectures by pre-multiplying with  $\mathbf{W}_1^T\mathbf{G}_1^{-1}$ and scaling by $\sum_{loci} 2p_j(1-p_j)$ which is calculated above as `cc` (and has value 238.4). We need the inverse of $\mathbf{G}$ and we will use `qgm_solve()` for inversion - it is about twice as fast.
+
+```{r}
+G1inv <- qgm_solve(G1)
+t8$b_vr1 <- t(W1)%*%G1inv%*%(gbv$ebv1)
+t8$b_vr1 <- t8$b_vr1/cc
+head(t8)
+```
+
+The plot shows that some signal is present! However it is weak and is observable since we know the true values! The true values of 0.4 are shrunk to ~ 0.02 (see below). In what follows remember that in real complex traits the known causal variants (if any) explain only a very minor fraction of the genetic variance at best! 
+
+ * `pch` changes point shape ... Google pch in 'R plot pch'
+ * `cex` controls point size
+
+```{r}
+hist(t8$b_vr1,breaks=100)
+plot(t8$alpha,t8$b_vr1, pch=1, cex =0.5)
+```
+
+We can look more closely at the loci with the different classes of loci. The true zero effect and the non zero are separated by `alpha` being < or > 0.01.  
+
+```{r}
+mean(t8[t8$alpha<0.01,]$b_vr1)
+hist(t8[t8$alpha<0.01,]$b_vr1,breaks=50, xlim=c(-0.025,0.025))
+mean(t8[t8$alpha>0.01,]$b_vr1)
+hist(t8[t8$alpha>0.01,]$b_vr1,breaks=50, xlim=c(-0.025,0.025))
+```
+
+I have sorted the data frame on absolute values of the estimated SNP effects into descending order (i.e. biggest magnitudes at the top), i.e `order(-abs(t8$bhat_vr1))`, and displayed the first 20 rows. The five large SNP appear in ranks 1, 2, 3, 6 and 15 (and were estimated with the correct sign so are not simply large errors!); all other SNPs in the top 20 have no true effect!
+
+```{r}
+t8[order(-abs(t8$b_vr1)),][1:20,]
+```
+
+We can look at the genic variance calculated from the SNP effects - these have been regressed back by random regressions so they are not the same as our SNP effects Tutorial 5! 
+
+```{r}
+vg_hat <- sum(2*t8$aaf*(1.-t8$aaf)*t8$b_vr1**2.)
+vg_hat
+```
+
+The only point of the above is to demonstrate that here we are not explaining very much of the total! There are negative covariances between the SNP effects which is why the EBVs are more accurate than what might be guessed from only 2% of the genic variance is explained by the estimates.
+
+## Van Raden Model 2
+The SNP effects for Van Raden 2 can be calculated.
+
+```{r}
+# ...
+```
+
+Compare `b_vr1` and `b_vr2` by plotting and using `lm()`
+
+```{r}
+# ...
+```
+
+## Questions
+
+ * Q5. Why are the `b_vr2` and `b_vr1` SNP effects so different in magnitude?
+ * Q6. How can this be corrected to make a better comparison?
+ * Q7. Carry out the correction by creating another column in the `t8$b_vr2a` as another column in the data frame and compare `b_vr1` and `b_vr2a`.
+
+```{r}
+# use for Q7
+```
+
+# Getting marker effects using `asreml()` functions
+For reference. We can get the SNP effects directly from `asreml()`. We need to provide the $\mathbf{W}$ matrix appropriately scaled, the $\mathbf{G}$, and the `asr` file - and then extract the information - it seems easier to use the formulae directly. This is illustrated below for Van Raden 1 only, Van Raden 2 follows by analogy. The answers agree to 6 decimal places, and there does not appear to be any advantage in computing time. 
+
+ * I don't find this particularly obvious or well-explained in the manual
+
+```{r}
+W1s <- W1/cc
+t8.mef <- meff(asr7_1, mef= list(G1="W1s"), effects= ~vm(id, G1))
+t8$mef_vr1 <- as.vector(t8.mef$meff$`vm(id, G1)`)
+plot(t8$b_vr1,t8$mef_vr1)
+head(t8)
+```
+
+# Predicting breeding values from SNP effects
+## With VR1 ...
+It is feasible that we might have carried out a SNP-BLUP instead of a GBLUP. If so we would have obtained the SNP effects directly. In which case we would have wished to calculate the EBVs. This is done following the SNP BLUP model and $\hat{\mathbf{g}} = \mathbf{W}\hat{\mathbf{b}}$ where the $\mathbf{W}$ and $\hat{\mathbf{b}}$ are the design matrix and solutions according to whether we are doing VR1 or VR2.
+
+So e.g. in VR1 ...
+
+```{r}
+jebv1 <- W1%*%t8$b_vr1
+plot(gbv$ebv1,jebv1)
+summary(lm(jebv1~1+gbv$ebv1))
+```
+
+## ... and VR2
+ ... repeat for VR2, note that we must use `b_vr2` not `b_vr2a` - it is what the model says!
+ 
+```{r}
+# for ebv2 and jebv2
+```
+
+## Questions
+
+ * Q8. Reproduce the TBV from the true SNP alphas ...
+ 
+```{r}
+# for calculation
+```
+
+# Outcomes
+
+ *  We have seen how to obtain the SNP effects from EBVs calculated by GBLUP (both VR1 and VR2).
+ *  We have compared these to true values since the data is simulated.
+ *  We have calculated genic variances from the true values and the estimates.
+ *  We have calculated EBVs from the SNP effects

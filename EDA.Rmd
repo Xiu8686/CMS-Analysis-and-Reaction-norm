@@ -5,7 +5,7 @@ date: "2026-02-28"
 output: html_document
 ---
 
-# Packages
+# Packages & Source functions
 
 ```{r library,warning=FALSE}
 library(tidyverse)
@@ -13,9 +13,11 @@ library(readxl)
 library(janitor)
 library(skimr)
 library(naniar)
-library(data.table)
 library(stringr)
+library(genio)
+library(asreml)
 
+source("function/load_functions.R")
 ```
 
 # File path
@@ -255,16 +257,60 @@ We now get the **joined form** $\text{pheno_joined}$
 head(pheno_joined, 20)
 ```
 
+### Build phenotype-to-pedigree (from Sheet1)
+
+`Sheet1` contains `animal/sire/dam` fields and is used as the bridge from phenotype IDs to pedigree IDs.
+
+```{r}
+normalize_cms_id <- function(x) {
+  x <- as.character(x)
+  x[x %in% c("", "NA", "NaN", "0", "2")] <- NA_character_
+
+  # Animal IDs in Sheet1 miss "00" after ICM
+  x <- str_replace(x, "^2022IRS1ICMFR", "2022IRS1ICM00FR")
+
+  # Parent IDs in Sheet1 miss "0000" after CBN to fit pedigree
+  x <- str_replace(x, "^2018IRS1CBN([0-9]{5}[A-Z][0-9]{2})$", "2018IRS1CBN0000\\1")
+  x
+}
+
+sheet1_map <- read_excel(pheno_file1, sheet = "Sheet1") %>%
+  clean_names() %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    fish_no = suppressWarnings(as.integer(fish_no)),
+    genotyping_tube_id = genotyping_tube_id,
+    animal = normalize_cms_id(animal),
+    sire = normalize_cms_id(sire),
+    dam = normalize_cms_id(dam)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+pheno_ped <- pheno_joined %>%
+  mutate(sample_id = as.character(sample_id)) %>%
+  left_join(sheet1_map, by = "sample_id")
+```
+
+```{r}
+head(pheno_ped, 50)
+```
+
 ## Pedigree Information
 
 ```{r}
-pedigree <- read_table2(ped_file, col_types = cols(
-    id = col_character(),
-    sire = col_character(),
-    dam = col_character(),
-    sibgroup = col_character(),
-    YC = col_double()
-    ))
+pedigree <- read_table(ped_file, col_types = cols(
+  id = col_character(),
+  sire = col_character(),
+  dam = col_character(),
+  sibgroup = col_character(),
+  YC = col_double()
+)) %>%
+  mutate(
+    sire = na_if(sire, "0"),
+    dam = na_if(dam, "0"),
+    is_founder = is.na(sire) & is.na(dam),
+    n_known_parents = (!is.na(sire)) + (!is.na(dam))
+  )
 ```
 
 Have a look at the pedigree structure:
@@ -273,3 +319,280 @@ Have a look at the pedigree structure:
 head(pedigree, 20)
 tail(pedigree, 20)
 ```
+
+Some summary of pedigree information:
+
+```{r}
+qgm_ped_summary(pedigree[,1:3])
+```
+
+From the result, we could see that there are 3051 different individuals, no multiple IDs. Quite clean!
+
+Quite a lot missing parents information.
+
+```{r}
+# Some summary statistics about pedigree
+pedigree %>%
+  summarise(
+    n_animals = n(),
+    n_unique_id = n_distinct(id),
+    n_founders = sum(is_founder),
+    n_non_founders = sum(!is_founder),
+    n_two_known_parents = sum(n_known_parents == 2),
+    n_one_known_parent = sum(n_known_parents == 1),
+    n_no_known_parent = sum(n_known_parents == 0)
+  )
+
+pedigree %>%
+  count(sibgroup, sort = TRUE) %>%
+  head(15)
+
+pedigree %>%
+  count(YC, sort = TRUE)
+```
+
+```{r}
+# Read Plink files (bim/fam/bed)
+plink_obj <- read_plink(tools::file_path_sans_ext(bed_file))
+geno <- plink_obj$X
+bim <- plink_obj$bim
+fam <- plink_obj$fam
+```
+
+```{r}
+head(fam, 10)
+head(bim, 10)
+tail(fam, 10)
+tail(bim, 10)
+```
+
+```{r}
+dim(geno)
+dim(fam)
+dim(bim)
+```
+
+```{r}
+sum(fam$id %in% pedigree$id)
+sum(pedigree$id %in% fam$id)
+```
+
+All genotyped samples can be matched to pedigree IDs.
+
+```{r}
+fam_ped <- fam %>%
+  left_join(
+    pedigree %>% select(id, sire, dam, sibgroup, YC, is_founder, n_known_parents),
+    by = "id"
+  )
+
+fam_ped %>%
+  summarise(
+    n_fam = n(),
+    n_missing_in_pedigree = sum(is.na(sibgroup)),
+    n_founders_in_genotyped = sum(is_founder, na.rm = TRUE),
+    n_non_founders_in_genotyped = sum(!is_founder, na.rm = TRUE)
+  )
+
+fam_ped %>%
+  count(sibgroup, sort = TRUE) %>%
+  head(15)
+```
+
+## Phenotype + Pedigree for Sire Model
+
+```{r}
+pheno_ped %>%
+  summarise(
+    n_records = n(),
+    n_with_animal = sum(!is.na(animal)),
+    n_with_sire = sum(!is.na(sire)),
+    n_with_dam = sum(!is.na(dam)),
+    n_animal_in_pedigree = sum(animal %in% pedigree$id, na.rm = TRUE),
+    n_sire_in_pedigree = sum(sire %in% pedigree$id, na.rm = TRUE),
+    n_dam_in_pedigree = sum(dam %in% pedigree$id, na.rm = TRUE)
+  )
+```
+
+```{r}
+sire_model_dat <- pheno_ped %>%
+  mutate(
+    # Treat 0 as missing for Cp replicate values before averaging
+    cp_1_clean = na_if(cp_1, 0),
+    cp_2_clean = na_if(cp_2, 0),
+    cp_3_clean = na_if(cp_3, 0),
+    cp_mean_clean = rowMeans(cbind(cp_1_clean, cp_2_clean, cp_3_clean), na.rm = TRUE),
+    cp_mean_clean = if_else(is.nan(cp_mean_clean), NA_real_, cp_mean_clean),
+
+    # Keep only sires that can be mapped into pedigree
+    sire = if_else(sire %in% pedigree$id, sire, NA_character_),
+    tissue_type = as.factor(tissue_type),
+    test_replicate = as.factor(test_replicate)
+  ) %>%
+  filter(!is.na(cp_mean_clean), !is.na(sire))
+
+sire_model_dat %>%
+  summarise(
+    n_records = n(),
+    n_sires = n_distinct(sire),
+    cp_mean_mean = mean(cp_mean_clean),
+    cp_mean_sd = sd(cp_mean_clean)
+  )
+
+sire_model_dat %>%
+  count(sire, sort = TRUE) %>%
+  head(15)
+```
+
+```{r eval=FALSE}
+# ASReml sire model
+
+ped_asreml <- pedigree %>%
+  transmute(
+    animal = id,
+    sire = if_else(is.na(sire), "0", sire),
+    dam = if_else(is.na(dam), "0", dam)
+  )
+
+Ainv <- ainverse(ped_asreml)
+
+fit_sire <- asreml(
+  fixed = cp_mean_clean ~ tissue_type + test_replicate,
+  random = ~ vm(sire, Ainv),
+  residual = ~ idv(units),
+  data = sire_model_dat,
+  na.method.X = "include",
+  na.method.Y = "omit"
+)
+
+summary(fit_sire)$varcomp
+summary(fit_sire, coef = TRUE)$coef.fixed
+summary(fit_sire, coef = TRUE)$coef.random
+```
+
+```{r eval=FALSE}
+# Simpler fallback if you want sire as IID random effect (without pedigree relationship)
+fit_sire_iid <- asreml(
+  fixed = cp_mean_clean ~ tissue_type + test_replicate,
+  random = ~ sire,
+  residual = ~ idv(units),
+  data = sire_model_dat,
+  na.method.X = "include",
+  na.method.Y = "omit"
+)
+
+summary(fit_sire_iid)$varcomp
+```
+
+## Genotype QC Summary
+
+```{r}
+snp_call_rate <- 1 - rowMeans(is.na(geno))
+sample_call_rate <- 1 - colMeans(is.na(geno))
+
+alt_af <- rowMeans(geno, na.rm = TRUE) / 2
+maf <- pmin(alt_af, 1 - alt_af)
+
+sample_qc <- tibble(
+  id = fam$id,
+  call_rate = sample_call_rate,
+  het_rate = colMeans(geno == 1, na.rm = TRUE),
+  hom_ref_rate = colMeans(geno == 0, na.rm = TRUE),
+  hom_alt_rate = colMeans(geno == 2, na.rm = TRUE)
+)
+
+snp_qc <- tibble(
+  snp_id = bim$id,
+  chr = bim$chr,
+  pos = bim$pos,
+  call_rate = snp_call_rate,
+  alt_af = alt_af,
+  maf = maf
+)
+```
+
+```{r}
+sample_qc %>%
+  summarise(
+    n_samples = n(),
+    mean_call_rate = mean(call_rate),
+    min_call_rate = min(call_rate),
+    mean_het_rate = mean(het_rate),
+    sd_het_rate = sd(het_rate)
+  )
+
+snp_qc %>%
+  summarise(
+    n_snps = n(),
+    mean_call_rate = mean(call_rate),
+    min_call_rate = min(call_rate),
+    n_monomorphic = sum(maf == 0),
+    n_low_maf_001 = sum(maf < 0.01),
+    n_low_maf_005 = sum(maf < 0.05)
+  )
+```
+
+```{r}
+sample_qc %>%
+  ggplot(aes(x = het_rate)) +
+  geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+  theme_bw() +
+  xlab("Sample heterozygosity (proportion of genotype == 1)")
+
+snp_qc %>%
+  ggplot(aes(x = maf)) +
+  geom_histogram(bins = 50, fill = "darkolivegreen3", color = "white") +
+  theme_bw() +
+  xlab("Minor allele frequency")
+
+snp_qc %>%
+  ggplot(aes(x = call_rate)) +
+  geom_histogram(bins = 30, fill = "tomato", color = "white") +
+  theme_bw() +
+  xlab("SNP call rate")
+```
+
+## Phenotype Coverage Check
+
+```{r}
+pcr_ids <- pcr_pheno %>%
+  mutate(fish_n = as.integer(str_extract(sample_no, "(?<=-F)\\d+"))) %>%
+  distinct(fish_n) %>%
+  mutate(in_pcr = TRUE)
+
+histo_ids <- histo_pheno %>%
+  mutate(fish_n = as.integer(str_extract(id, "(?<=_)\\d+(?=\\s*\\()"))) %>%
+  distinct(fish_n) %>%
+  mutate(in_histo = TRUE)
+
+pheno_overlap <- full_join(pcr_ids, histo_ids, by = "fish_n") %>%
+  mutate(
+    in_pcr = replace_na(in_pcr, FALSE),
+    in_histo = replace_na(in_histo, FALSE),
+    overlap_group = case_when(
+      in_pcr & in_histo ~ "Both PCR and Histo",
+      in_pcr & !in_histo ~ "PCR only",
+      !in_pcr & in_histo ~ "Histo only"
+    )
+  )
+
+pheno_overlap %>%
+  count(overlap_group)
+```
+
+```{r}
+pheno_overlap %>%
+  ggplot(aes(x = overlap_group, fill = overlap_group)) +
+  geom_bar(show.legend = FALSE) +
+  theme_bw() +
+  ylab("Number of fish IDs") +
+  xlab(NULL)
+```
+
+```{r}
+sum(as.character(pcr_pheno$sample_id) %in% fam$id)
+sum(pcr_pheno$sample_no %in% fam$id)
+sum(histo_pheno$id %in% fam$id)
+```
+
+No direct string overlap is observed between phenotype IDs and PLINK `fam$id`. In this project, `Sheet1` serves as the external crosswalk to connect phenotype and pedigree/genotype IDs.

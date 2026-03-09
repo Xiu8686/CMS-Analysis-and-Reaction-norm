@@ -1,0 +1,333 @@
+---
+title: "Monte-Carlo Markov Chains (MCMC)"
+author: "QGM Team"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+# Introduction
+
+MCMC is a powerful method for finding solutions to complex models. It works by creating a long chain of estimates of our parameters, where the next value in our chain by sampling that is conditional on where we are now. MCMC is often associated with what are called Bayesian techniques, but MCMC is not necessarily Bayesian, nor are Bayesian techniques always using MCMC. We have to be aware that when we do use MCMC we may be moving between different statistical philosophies from 'Frequentist' statistics to 'Bayesian' statistics - and the debate over these philosophies is long-standing and very heated. Put simply, 'Frequentist' approaches, of which `asreml()` may be considered an example, is concerned with likelihood of data, with estimates and their standard errors, and hypothesis testing. 'Bayesian' approaches are concerned with prior distributions for estimates (what we think they are before we do the experiment), likelihood of data, and posterior distributions which are the outcome of the priors and the data. The posterior distribution for the parameters being estimated are our solutions, and like any distribution they have a mean, a standard deviation, and probabilities.
+
+We are going to look at some simple models using `MCMCglmm` package which was written by Jarod Hadfield, which DOES use a Bayesian approach to problems. Jarod gives courses on MCMC and the package contains excellent notes on the package and its statistical background. We will compare its outcomes to using \``asreml` but TAKE NOTE OF THE LANGUAGE that is being used and remember that when we make these comparisons, statistical philosophies are changing, not just the language.
+
+MCMC uses random sampling, so every time a chain is run it results in a different outcome. If we run the chain for long enough the distributional properties of each chain will be the same i.e. the posterior distribution obtained with its mean, s.d. etc. However, a consequence of this is that the answers I might give below will differ (slightly) from the answers that you will get (so I use \~ to mean approximately). A conclusion from the fact that the answers do change slightly is that the chain should be longer so that the sampling error arising from the length of the chain is negligible for the estimate required. However, note that the results from two runs of the chain can be combined to give better estimates!
+
+Finally, this tutorial is for giving perspectives on the world beyond what is primarily taught in QGM. QGM does not expect you to be able to use the package outside this tutorial.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(width= 128)
+```
+
+```{r}
+library("MCMCglmm")
+library("asreml")
+library("ggplot2")
+library("GGally")
+```
+
+# Data set
+
+The comparison will be made using the data on 828 Blue Tits contained within the `MCMCglmm` package. The Blue Tit is a small wild bird, common in UK gardens and woods. There are three factors in the data `animal`, `sex` and `fosternest`, with the latter two having 3 and 104 levels respectively, and a covariate `hatchdate`. `fosternest` is a 'common environment' term.
+
+The pedigree has 1040 identities. $\textit{Note}$ in `MCMCglmm` the pedigree is assumed ordered as individual, dam, sire ... an $\mathbf{A}$ matrix will be the same even if sexes are reversed but interpretation may not! The section of the pedigree 570:579 identifies a set of full sibs which we will use later.
+
+```{r}
+data(BTdata, package="MCMCglmm")
+data(BTped, package="MCMCglmm")
+head(BTdata)
+head(BTped)
+BTped[570:579,]
+nrow(BTdata)
+nrow(BTped)
+nlevels(BTdata$fosternest)
+nlevels(BTdata$sex)
+```
+
+# Setting up a model
+
+As always we need to define a fixed model and a random model, and the latter requires distributions. One of the benefits of MCMC is its ability to directly model categorical data e.g. healthy/diseased, but we will stick to assuming MVN (or Gaussian as Normal is sometimes called). We will use `fixed= tarsus ~ sex + hatchdate, random= ~ animal + fosternest, rcov= ~ units, family="gaussian", data=BTdata, pedigree=BTped,`; the `rcov=` corresponds to `residual=` in `asreml()`, and the other terms are self-explanatory.
+
+In MCMC we produce a chain and we have to decide how long the chain should be (called iterations or cycles). In genetics, the data is large and MCMC takes a lot of computer time so there is pressure on the user to reduce the chain length. However each sample from the chain is a random sample from the posterior distribution of the estimates (i.e. the distribution of the solutions) and you need a long enough chain to have sampled ALL the regions of the posterior distribution (the set of all possible solutions is often referred to as the 'solution space'). If we are estimating 20 parameters, we have a 20 dimensional space to sample. If we had 50,000 markers it would be a 50,000 dimensional space to sample! Therefore chains need to be 'sufficiently long' (what that means is another lecture course - and not one I could give). For this example we obtain 60,000 samples `nitt=60000`.
+
+We start a chain at some point in the solution space which is a decision by the user (or a default by the code writer). Where we are in the next iteration will depend on where we started from and are therefore not completely random draws from the posterior distribution. The influence of the starting position will decay over time, but we need to throw away the first iterations because of this. This settling down period is called the 'burn-in' period and here `burnin=10000` i.e. 1/6 of all iterations will be thrown away. The length of the burn-in depends on the problem.
+
+A further issue is that for some problems it is easy to explore the solution space as we move from one iteration to the next, and the random draw from the next iteration is likely to be in a very different part the solution space. In other problems it is very slow to move around the space (predicting genotypes in a pedigree is a classic example) and this has two conseqences: (i) we need more samples in our chain i.e. `nitt` will need to increase, and (ii) since the movement is slow, one iteration is very like the next (i.e. it is highly correlated). So when we have 60,000 samples from 60,000 iterations, they are not independent, and thinking about them as a sample as 60,000 is misleading in how much information they contain. For this reason, one approach is to 'thin' the samples: instead of taking every one, you skip a few before saving the next one, when it is assumed sufficient movement in the solution space will have occurred to allow them to be considered independent (another issue for the other lecture course). Here we save every 25th iteration `thin=25`; this has obvious consequences for `nitt`.
+
+In summary our 60,000 iterations, give us (60,000-10,000)/25 = 2000 samples that we consider as being independent (or close to), i.e we throw away 29/30, close to 97%, of the computational effort! There are tools available that can help guide these decisions for each problem. Now we can run the model! It takes longer than `asreml()`. The output is an object containing all of our results.
+
+```{r}
+bt.mcmc <- MCMCglmm(fixed= tarsus ~ sex + hatchdate, random= ~ animal + fosternest, rcov= ~ units, family="gaussian", nitt=60000, burnin=10000, thin=25, data=BTdata, pedigree=BTped, pr=TRUE)
+```
+
+# Exploring the outputs
+
+## Where are they?
+
+The output `bt.mcmc` is an object with many things within it. The sampling for the fixed and random effect solutions can be found in `bt.mcmc$Sol`, which will give the posterior distributions. The sampling for the variance components is contained within `bt.mcmc$VCV`.
+
+As mentioned above you will get small differences each time you run the model because the process is random. You will get a different answer to your neighbour too. One solution to solving some of the problems with MCMC estimation is to run many separate chains instead of one long one.
+
+```{r}
+bt.sol <- as.data.frame(bt.mcmc$Sol)
+bt.vcv <- as.data.frame(bt.mcmc$VCV)
+nrow(bt.sol)
+ncol(bt.sol)
+nrow(bt.vcv)
+ncol(bt.vcv)
+```
+
+These both contain 2,000 observations as expected. The first 4 of the 1148 columns in `bt.sol` are for the fixed effects: 1 for the `Intercept`, the fitted mean; 2 for `sex` (Male and UNK, with Female taken as 0); and 1 for the covariate `hatchdate`. The remaining 1144 columns are 1040 for the random effects of all birds in the pedigree, and 104 for the random effects of all the foster nests. `bt.vcv` contains 3 columns, one for each variance component, including the residual.
+
+```{r}
+head(bt.sol[,1:9])
+head(bt.sol[,(ncol(bt.sol)-10):ncol(bt.sol)])
+head(bt.vcv)
+```
+
+## Fixed effects
+
+For example what is the difference between Males and Females? Look at the posterior distribution of `sexMale` (as `sexFemale` is set as a control class with effect 0, as an identifiability constraint). We can look at its posterior distribution as a histogram of the 2000 samples which our theory says is a sample from the posterior distribution. We can look at its mean and its s.d. which 'correspond' to the estimate and s.e. in `asreml` (i.e. a parameter estimate and the uncertainty attached to the parameter).
+
+```{r}
+hist(bt.sol$sexMale,breaks='FD')
+print(paste0("Posterior distribution of difference has mean ",round(mean(bt.sol$sexMale),3),", and s.d. ",round(sd(bt.sol$sexMale),3)))
+```
+
+We can also talk about probabilities and quantiles. These kinds of questions makes the Bayesian output rich. What is the probability that the difference lies between 0.7 and 0.8 units?. The answer is \~0.61. What is the inter-quartile range of the posterior distribution?. The answer is \~(0.80-0.73), i.e \~0.07.
+
+```{r}
+nrow(bt.sol[bt.sol$sexMale>0.7 & bt.sol$sexMale<0.8,])/nrow(bt.sol)
+summary(bt.sol$sexMale)
+```
+
+We can smooth our histograms to perhaps get a clearer idea of shape. For smoothing we are going to use a standard smoother in R within a qgm_helper function `qgm_post_pdf()`, printed below. This takes in a column of data from a data frame and produces a plot.
+
+```{r}
+qgm_post_pdf <- function (df,i) {
+  dval <- density(df[,i])
+  plot(dval,main=paste0("Density for ",colnames(df[i])),xlab=paste0(colnames(df[i])))
+  return("Done")
+}
+```
+
+With `bt.sol$sexMale` which is column 2 in our data frame we get:
+
+```{r}
+qgm_post_pdf(bt.sol,2)
+```
+
+## Variance Components
+
+The same can be done with variance components. The mean and s.d. of the posterior distribution for each component is shown below.
+
+```{r}
+print(paste0("Posterior distribution of Va has mean ",round(mean(bt.vcv$animal),3),", and s.d. ",round(sd(bt.vcv$animal),3)))
+print(paste0("Posterior distribution of Ve has mean ",round(mean(bt.vcv$units),3),", and s.d. ",round(sd(bt.vcv$units),3)))
+print(paste0("Posterior distribution of Vf has mean ",round(mean(bt.vcv$fosternest),3),", and s.d. ",round(sd(bt.vcv$fosternest),3)))
+```
+
+## Functions of parameters (and a Bayesian warning!)
+
+The theory says the distribution of any function of the parameters (fixed or random or latent) among our samples is the posterior distribution of the value of our function, given our priors and data, e.g. heritability. The heritability ($h^2$) is `animal`/(`animal` + `fosternest` + `units`), and the fraction of variance due to common environment ($c^2$) is `fosternest`/(`animal` + `fosternest` + `units`).
+
+```{r}
+bt.vcv$vp <- bt.vcv$animal+bt.vcv$fosternest+bt.vcv$units
+print(paste0("Posterior distribution of vp has mean ",round(mean(bt.vcv$vp),3),", and s.d. ",round(sd(bt.vcv$vp),3)))
+bt.vcv$hh <- bt.vcv$animal/bt.vcv$vp
+hist(bt.vcv$hh,breaks='FD')
+print(paste0("Posterior distribution of hh has mean ",round(mean(bt.vcv$hh),3),", and s.d. ",round(sd(bt.vcv$hh),3)))
+bt.vcv$cc <- bt.vcv$fosternest/bt.vcv$vp
+hist(bt.vcv$cc,breaks='FD')
+print(paste0("Posterior distribution of cc has mean ",round(mean(bt.vcv$cc),3),", and s.d. ",round(sd(bt.vcv$cc),3)))
+```
+
+What is the probability that $h^2$ \> 0.8? Very small.
+
+```{r}
+nrow(bt.vcv[bt.vcv$hh>0.8,])/nrow(bt.vcv)
+```
+
+Now we come to some of the distinction in philosophy. Take care. What is the probability that $c^2$ \> 0? This may remind us of our hypothesis test in `asreml()`. $\textbf{The next line is very dangerous!}$
+
+```{r}
+nrow(bt.vcv[bt.vcv$hh>0.0,])/nrow(bt.vcv)
+```
+
+It is 1 because we use priors in the analysis that says that hh \> 0! We have told the model this before it sees any data! This answer has nothing to do with the data! With the same priors, even if the posterior mean was 0.001, the answer would still be 1. We could have priors that allow 0, but that is not very usual in the standard genetic models. We are in the area in which philosophy of approach is important to remember when drawing conclusions.
+
+-   Beware the ideas and language of hypothesis testing in Bayesian models - stick to probabilities until proficient in Bayesian statistics!
+-   The estimates you get out always depend on your priors, which are sometimes unstated (as in this Tutorial!), although this should never be the case in publications. People talk about strong and weak priors in describing whether they are easily changed by more information or not. Small data will be heavily influenced by priors. What is considered to be small data depends on the problem and the priors.
+
+## Summaries and Boxplots
+
+Some simple summary functions.
+
+```{r}
+summary(bt.vcv$hh)
+boxplot(bt.vcv$hh)
+```
+
+## Posterior distributions of breeding values
+
+We can get EBVs and the posterior standard deviations of the TBV (the mean of the posterior for the TBV is the EBV).
+
+```{r}
+hist(bt.sol$animal.R187628,breaks = 'FD')
+print(paste0("Posterior distribution of BV has EBV ",round(mean(bt.sol$animal.R187628),3),", and s.d. ",round(sd(bt.sol$animal.R187628),3)))
+```
+
+# Convergence of MCMC
+
+Convergence is when the solution space has been thoroughly explored. When that has occurred can be difficult to say, and is part of that other lecture course that is not being given. A first step is to plot the series of 2000 samples for a range of parameters. We will use a qgm_helper function `qgm_series()` to plot these. `qgm_series()` plots the series and adds a dotted blue line showing the mean, and a continuous red line which is a `loess()` fit, a localised regression technique. Ask the question: does it look like 'white noise'? It is a difficult question to answer. One observation is that the very low amplitude waves in the red line suggest that it is not strongly divergent from white noise for either.
+
+```{r}
+qgm_series <- function(df,i) {
+  rn <- as.integer(row.names(df))
+  yl <- predict(loess(df[,i] ~ rn, span = 0.1))
+  ym <- rep(mean(df[,i]),times=length(rn))
+  plot(x=rn, y=df[,i], main=paste0("Series for ", colnames(df[i])), xlab="Sample Number", ylab=paste0(colnames(df[i])),col="grey")
+  lines(x=rn, y=yl, col="red")
+  lines(x=rn, y=ym, col="blue",lty=3)
+  return("Done")
+}
+```
+
+The series for Males minus Females
+
+```{r}
+qgm_series(bt.sol,2)
+```
+
+The series for $h^2$ and $c^2$ ...
+
+```{r}
+qgm_series(bt.vcv,5)
+qgm_series(bt.vcv,6)
+```
+
+-   Having looked at a number of chains with 2000 samples, some show a lack of convergence for $h^2$ with a small number of low amplitude waves with sustained periods \> the mean, and sustained periods \< the mean, which suggests that longer chains are needed, and greater thinning. This is less evident for the sex difference.
+-   The $c^2$ plots can sometimes display a behaviour in which the the value is very close to 0 for long periods - remember every chain is different!. This behaviour arises from the the use of minimally informative priors for variance components in MCMC. It is illustrated in more detail with longer chains in the handout 'An_Illustrative_Chain_for_the_Blue_Tit_Data.pdf'
+
+# Joint distributions
+
+One problem with `asreml()` approaches is that it can be difficult to compute the covariance among the uncertainties in the estimates obtained, or more precisely, how uncertainties in one estimate influence the uncertainties in another. For example what is the prediction covariance between one individual and another which is a full-sib? In MCMC it is easier as we simply look at the pair of values each iteration.
+
+Below we plot the joint distribution of the estimates of $V_a$ and $V_e$. We can calculate their prediction covariance ... the correlation is very large in magnitude and negative, which is often the case for $V_a$ and $V_e$. This implies if the true value of $V_a$ is towards the higher end of its posterior distribution, the true value of $V_e$ is likely to be at the lower end of its posterior distribution.
+
+```{r}
+plot(x=bt.vcv[,1], y=bt.vcv[,3], xlab="animal ... va", ylab="units ... ve")
+cor(x=bt.vcv[,1],y=bt.vcv[,3])
+```
+
+Now look at the joint distribution of a sire, dam and two full sibs. For these the offspring have phenotypes but not the parents. The full sib family is relatively large (15) and the only offspring of the parents.
+
+```{r message=FALSE, warning=FALSE, progress=FALSE}
+p4bt <- ggpairs(data = bt.sol[,c("animal.R187923","animal.R187926","animal.R187626","animal.R187628")],lower = list(continuous = wrap(ggally_points, size = 0.01, alpha=0.5)))
+p4bt
+summary(lm(animal.R187626 ~ 1 + animal.R187628, data= bt.sol))
+```
+
+# Questions
+
+-   Q1. Why is there a large -ve correlation between $V_a$ and $V_e$? Hint: firstly, suppose you knew $V_p$ exactly.
+
+-   $\textbf{Answer.}$ $V_p$ is the sum of the other components, and the two largest are $V_a$ and $V_e$, so $V_e \approx V_p - V_a$. If I knew $V_p$ exactly, then if the mean of the posterior distribution of $V_a$ is an overestimate then I must underestimate $V_e$. If you look at the data set, you might agree that the most accurately estimated variance is $V_p$, it will be similar to what you calculate with `var()`, although not exactly - so a similar argument will apply. I am confident in the estimate of $V_p$ so if there is a deviation in the estimate of $V_a$ there is an approximately equal and opposite deviation in $V_e$.
+
+-   Q2. Explain the signs of the correlations observed for the full-sib family in the `ggally()` plot. Hint: where does the information for the predictions come from?
+
+-   $\textbf{Answer.}$ In this data set the information on the TBVs for the sire (R187923) and dam (R187926) comes primarily from the mean of their large full-sib family, so the mean of their TBVs is much more precisely estimated than the individual TBVs (see below). So if there is a positive deviation in the estimation of R187923's TBV this will tend to be compensated for by a negative deviation in the estimation of R187926's TBV. For the same reason, deviations in the relatively well-estimated full-sib family mean will tend to promote deviations in the same direction for each of the full sibs and for both parents, because they all share that information in the same way.
+
+```{r}
+var((bt.sol$animal.R187923+bt.sol$animal.R187926)/2)
+var(bt.sol$animal.R187923)
+var(bt.sol$animal.R187926)
+```
+
+-   Q3. Analyse the data using `asreml()`. Compare the outcomes for the estimate of differences between male and female in tarsus length, and the heritability.
+-   $\textbf{Answer.}$
+
+```{r}
+btinv <- ainverse(BTped)
+bt.asr <- asreml(fixed= tarsus ~ sex + hatchdate, random= ~ vm(animal,btinv) + idv(fosternest), residual= ~ idv(units), data= BTdata )
+qgm_summary <- function(asr){
+  print("CONVERGENCE")
+  print(paste0(asr$converge," with logL = ",asr$loglik))
+  cat("\n")
+  print("VARIANCE COMPONENTS")
+  print(summary(asr)$varcomp)
+  cat("\n")
+  print("FIXED EFFECTS")
+  print(as.data.frame(summary(asr,coef=TRUE)$coef.fixed))
+  cat("\n")
+  print("WALD TESTS")
+  print(as.data.frame(wald(asr,denDF="numeric",ssType="conditional")$Wald)[,c(1,2,4,6)])
+}
+qgm_summary(bt.asr)
+vpredict(bt.asr, hh ~ V2/(V1+V2+V3))
+vpredict(bt.asr, cc ~ V1/(V1+V2+V3))
+```
+
+-   So `asreml()` estimates the difference between males and females as 0.7686 with s.e. 0.0571. The `MCMCglmm()` estimate using the mean of the posterior distribution was \~0.77, with posterior s.d. \~0.06 (language!), depending on the random sampling in your chain. How much of this difference is due to approach is hard to say as we would need to have an infinitely long chain to answer that question - but the differences are very small here, especially in relation to the sampling error.
+
+-   For $h^2$ `asreml()` estimates as 0.514 with s.e. 0.090; `MCMCglmm()` estimates it as \~0.53 with posterior s.d. \~0.09, again depending on the sampling in your chain.
+
+-   For $c^2$ `asreml()` estimates as 0.082 with s.e. 0.033; `MCMCglmm()` estimates it as \~0.08 with posterior s.d. \~0.03, again depending on the sampling in your chain.
+
+-   I conclude that despite the difference in philosophy in many cases our ideas on magnitudes and uncertainty may not change very much. One would expect that with MCMC samples \> 2000 the variation among repeat chains would reduce.
+
+-   Q4. If there is time, since there are many options and things to look at, explore the impact of reducing `burnin` or `nitt` or `thin`. Tip: this is about convergence, so using `qgm_series()` may be the most useful tool.
+
+-   $\textbf{Answer.}$ Some different options ...
+
+    -   With the same sample size (2000), and burn in, no thinning ... you can see the large more persistent waves caused by the correlations between consecutive points. The range is narrower as extreme points have had less opportunity to be explored due to the slower exploration of the solution space.
+
+```{r}
+bt.mcmc <- MCMCglmm(fixed= tarsus ~ sex + hatchdate, random= ~ animal + fosternest, rcov= ~ units, family="gaussian", nitt=12000, burnin=10000, thin=1, data=BTdata, pedigree=BTped, pl=TRUE)
+bt.vcv <- as.data.frame(bt.mcmc$VCV)   
+bt.vcv$hh <- bt.vcv$animal/(bt.vcv$animal+bt.vcv$fosternest+bt.vcv$units)
+qgm_series(bt.vcv,4)
+print(paste0("Posterior distribution of hh has mean ",round(mean(bt.vcv$hh),3),", and s.d. ",round(sd(bt.vcv$hh),3)))
+```
+
+-   With the same sample size (2000), same thinning (25), no burnin ... this change will only influence the first 200 samples, but when looking at the profile of the samples for $h*2$ the impact is not clear in all examples.
+
+```{r}
+bt.mcmc <- MCMCglmm(fixed= tarsus ~ sex + hatchdate, random= ~ animal + fosternest, rcov= ~ units, family="gaussian", nitt=50000, burnin=0, thin=25, data=BTdata, pedigree=BTped, pl=TRUE)
+bt.vcv <- as.data.frame(bt.mcmc$VCV)   
+bt.vcv$hh <- bt.vcv$animal/(bt.vcv$animal+bt.vcv$fosternest+bt.vcv$units)
+qgm_series(bt.vcv,4)
+print(paste0("Posterior distribution of hh has mean ",round(mean(bt.vcv$hh),3),", and s.d. ",round(sd(bt.vcv$hh),3)))
+```
+
+-   With the same sample size (2000), no thinning, no burn-in: similar to previous outcome with no thinning.
+
+```{r}
+bt.mcmc <- MCMCglmm(fixed= tarsus ~ sex + hatchdate, random= ~ animal + fosternest, rcov= ~ units, family="gaussian", nitt=2000, burnin=0, thin=1, data=BTdata, pedigree=BTped, pl=TRUE)
+bt.vcv <- as.data.frame(bt.mcmc$VCV)   
+bt.vcv$hh <- bt.vcv$animal/(bt.vcv$animal+bt.vcv$fosternest+bt.vcv$units)
+qgm_series(bt.vcv,4)
+print(paste0("Posterior distribution of hh has mean ",round(mean(bt.vcv$hh),3),", and s.d. ",round(sd(bt.vcv$hh),3)))
+```
+
+-   ... and looking at $c^2$ ...
+
+```{r}
+bt.vcv$cc <- bt.vcv$fosternest/(bt.vcv$animal+bt.vcv$fosternest+bt.vcv$units)
+colnames(bt.vcv)
+qgm_series(bt.vcv,5)
+print(paste0("Posterior distribution of cc has mean ",round(mean(bt.vcv$cc),3),", and s.d. ",round(sd(bt.vcv$hh),3)))
+```
+
+# Outcomes
+
+-   We have explored an alternative to REML and `asreml()` by taking a brief look at `MCMCglmm()`.
+-   We have taken a single step on the long path of understanding the differences between 'Frequentist' and 'Bayesian' inference philosophies.
+-   We have indicated some of the issues in setting up models concerned with getting convergence of the posterior distributions.
+-   We have seen some of the richness of the Bayesian output.
+-   We have seen hints of a weakness in terms of computational burden.

@@ -1,0 +1,75 @@
+---
+title: 'Setting Seeds'
+author: 'JAW'
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output:
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+Setting seeds is an important quality control when doing any simulation which involves random numbers. If you do not set a seed then every time the programme is run you will very likely get an answer that you never be able to reproduce if you needed to, or less likely (but it happens on some software and operating systems) the same answer as you got the time before!
+
+So taking control of setting the seed and recording the seeds used are an important part of QC in simulations. The following is just an overview.
+
+# Some examples
+
+```{r}
+set.seed(123)
+rnorm(10)
+```
+
+```{r}
+set.seed(456789)
+rnorm(10)
+```
+
+```{r}
+set.seed(123) # repeat the first set
+rnorm(5)
+rnorm(5) # the sequence of 10 is retained as 2 sets of 5
+```
+
+# Managing random numbers
+
+A good practice is shown below. See http://www0.cs.ucl.ac.uk/staff/d.jones/GoodPracticeRNG.pdf for better practice. Some random number generators require more than one number to seed the random number generator. There are different kinds of generator - R has several available, the default is used below.
+
+```{r}
+my.seed <- as.integer(100000000*runif(1)) # 1 sample from uniform
+print(paste0("My seed is ... ",my.seed)) # this is the seed, print it out
+set.seed(my.seed) # set it
+dum <- runif(1000) # optional warm up, dum is for dummy variable, 
+# 
+# ... do a job using the random numbers ...
+#
+my.seed <- as.integer(100000000*runif(1)) # generate another number as next seed
+save(my.seed,file='seed_store.R') # save it to a file
+print(paste0("My next seed is ... ",my.seed)) 
+```
+
+ * ... next time
+
+```{r}
+load('seed_store.R')
+print(paste0("My seed is ... ",my.seed)) # this is the seed, print it out
+set.seed(my.seed)
+#
+# ...
+#
+```
+
+# A summary
+
+ * Starting up
+   + run a generator
+   + write one of the random numbers to a file as the next seed
+ * then 
+   + next run, read in the seed, 
+   + report it as the seed for that run 
+   + write one of the random numbers to a file as the seed for the next run

@@ -1,0 +1,419 @@
+---
+title: "Tutorial 9: Validation"
+author: "QGM Team"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+# Introduction
+
+In this tutorial we will look at classical cross-validation. This is where the data is randomly split up into k sets (for k-fold cross-validation) and the model is fitted to (k-1) sets as a training set and the parameters used to predict the phenotypes of the remaining validation set. This is repeated so that each set has been used as a validation set once and been included in the training set (k-1) times. Each time we assess the quality of the prediction.
+
+We are going to do 5-fold cross-validation using the genomic data used for Tutorial 7 supplemented with some new data (400 random individuals) so that the Tutorial 7 data is Set 1 of 5.
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+There are several good graph plotting packages in R. I am going to use "lattice" at a later point in the tutorial, because it does what I want simply.
+
+```{r library, message=FALSE}
+library("asreml")
+library("lattice")
+```
+
+QGM helper functions ... nothing new ...
+
+```{r}
+source("qgm_helpers_t9.R")
+```
+
+# Genotypes and relationship matrices
+
+Now we have 500 individuals with genotypes and phenotypes. Each training set will have 400 individuals. You will remember that when we fitted models with a pedigree all the individuals in the pedigree had an EBV even though only a subset had phenotypes in the data in the model fitting, i.e. the training set was not the full pedigree. The same principle applies: if individuals are incorporated into the relationship matrix then we will get EBVs for them - the information from the training set on breeding values (and implicitly on SNP effects - Tutorial 8!) is spread across all the individuals for which we have genotypes using the relationships.
+
+Although we will have to fit the model with different training sets for the cross-validation we only have to prepare $\mathbf{G}$ once. Computationally we would be better off if we calculated the inverse of $\mathbf{G}$ as well and provided that to `asreml()` rather than $\mathbf{G}$ since it would save the repeated time-consuming inversion that will happen in the cross-validation (and this can be done), however for simplicity we are going to do it the long way. Inversion times increase with the cube of their size, so 5 times as big, is \~ 125 times longer, so in big problems this is not trivial.
+
+We are not going to use both VR1 and VR2. We are going to use VR1 and think of SNP effects as allelic substitutions, therefore we will calculate $W_1$ and $G_1$. The structure of the genotypes is the same as Tutorial 7, except there are more individuals. The loci are labelled as before, and we will do a quick check to confirm there are no missing values.
+
+## Read and scan the genotypes
+
+```{r}
+t9gen <- read.csv(file="rgen9.csv",header=TRUE,na.strings=c("NA"))
+head(t9gen[,1:8])
+tail(t9gen[,1:8])
+loci <- c(2:501)
+qgm_missing_snp(t9gen,loci)
+```
+
+For R code interest, one can check for duplicated SNPs or identical individuals. There aren't any, but it has happened!
+
+-   The first line looks for duplicated rows in the genotype data, which might occur with identical twins (say).
+-   The second line looks for duplicated SNPs - the R code for this is not immediately obvious.
+
+```{r}
+which(duplicated(t9gen[,loci]))
+which(duplicated(as.list(t9gen[,loci])))
+```
+
+Everything looks OK. So we do the calculations of $\mathbf{W}_1$ and create an invertible $\mathbf{G}_1$ as before.
+
+```{r}
+aaf <- qgm_counts_to_freq(t9gen[,loci])
+cc <- sum(2.*aaf*(1.-aaf))
+W1 <- qgm_vr1_to_W(t9gen[,loci],t9gen[,1],colnames(t9gen)[loci])
+G1 <- qgm_W_to_G(W1,cc)
+G1 <- G1+0.001*diag(nrow(G1))
+```
+
+Following Lecture 9, we shall check how closely the genetic variance among the individuals represented in $\mathbf{G}_1$ is estimated by the $V_g$ parameter estimated in `asreml()` by calculating $\overline{diag(\mathbf{G}_1)}-\overline{\mathbf{G}_1}$.
+
+```{r}
+mean(diag(G1))-mean(G1)
+```
+
+As an illustration of genetic variation within a subset: the first 100 samples are those from Tutorial 7 - the scaling factor for this subset is obtained below.
+
+```{r}
+mean(diag(G1[1:100,1:100]))-mean(G1[1:100,1:100])
+```
+
+-   Both scaling factors are close to 1.
+
+## Questions
+
+-   Q1. Given the model that was simulated, why is it unsurprising that $V_g$ estimated from $\mathbf{G}_1$ will closely estimate the genetic variation among all the individuals represented in $\mathbf{G}_1$.
+
+# Reading the data
+
+It is a simple structure again. Here `set` is not intended as a fixed effect but is the outcome of the random partition of the 500 data points into 5 equal sized sets.
+
+-   In what follows we will be setting phenotypes to missing, set by set, so there is a column called `spare` which allows me to recreate the full set of the phenotypes.
+-   The data includes the `tbv`, which is used for comparisons later.
+-   I have an extra column called `jid` to avoid any computational complications from calling `id` a factor in R.
+-   In cross-validation every data point is predicted in a validation set once, and only once. The column `ebv` is created to hold this value.
+-   We will wish to calculate accuracies, so store the diagonal element for each individual in $\mathbf{G}_1$ in `t9dat`.
+-   In the course of the analysis below some extra working columns will be needed for receiving data from `qgm_random_effects()`; these have been called `w.ebv`, `w.se`, `w.z`, and `w.jid`
+
+```{r}
+t9dat <- read.csv(file="rdat9.csv",header=TRUE,na.strings=c("NA"))
+t9dat$gii <- diag(G1)
+t9dat[,c("ebv","w.ebv","w.se","w.z","w.jid")] <- NA
+t9dat$id <- factor(t9dat$id)
+head(t9dat)
+```
+
+# Obtaining a 'consensus' estimate of heritability
+
+As explained in Lecture 8, the scaling of the correlation $corr(\hat{g},g)$ by $\sqrt{h^2}$ to obtain the accuracy of the breeding values is a property of the phenotypes not the EBV, and it is advisable to use the same value for the different sets. The of $h^2$ value used can be difficult to decide upon, especially if the data is not very large so sampling errors of estimates from the data are large and vary greatly across models. So here we will simply use the estimate from all the data, which is 0.4444 (s.e. 0.0636).
+
+```{r}
+asr9 <- asreml(fixed= phe ~ 1, random= ~vm(id,G1), residual= ~idv(units), data= t9dat )
+asr9 <- qgm_continue(asr9,10)
+qgm_summary(asr9)
+hh <- vpredict(asr9, hh ~ V1/(V1+V2))
+attributes(hh)
+hh
+hh_use <- as.numeric(hh$Estimate)
+```
+
+# Set 1 as a validation set
+
+## Constructing the training set and fitting the model,
+
+The code in the next major section sets up a `for` loop and a data frame to capture outcomes from doing the cross-validation. However before running it, let us go through the process using set 1 as the validation set (`vset`) and sets 2 to 5 as the training set (`tset`).
+
+The key point is that set 1 data is set to missing so it does not influence the parameter estimates. We also calculate the estimated heritability (for interest) within the validation set by multiplying the estimated variance parameter by `kval`, although it is close to 1 (0.998). The estimate of $h^2$ within set 1 is 0.4669 with s.e. 0.0748.
+
+```{r}
+vset <- t9dat$set==1 # helps code clarity, creating the list of rows in set 1
+tset <- t9dat$set!=1 # helps code clarity, creating the list of rows in remaining sets
+t9dat[vset,"phe"] <- NA # set the validation set as missing so they do not influence parameters
+asr9 <- asreml(fixed= phe ~ 1, random= ~vm(id,G1), residual= ~idv(units), data= t9dat )
+asr9 <- qgm_continue(asr9,10)
+qgm_summary(asr9)
+kval <- mean(diag(G1[vset,vset])) - mean(G1[vset,vset]) # mean might not be 0 for vset
+print(paste0('mean(diag(G1))-mean(G1) for set 1 ... ',kval))
+hh_hat <- vpredict(asr9, hh ~ kval*V1/(kval*V1+V2))
+hh_hat
+hh_hat <- as.numeric(hh_hat)
+vg <- vpredict(asr9, vg ~ V1)
+vg_hat <- as.numeric(vg$Estimate)
+```
+
+## Obtaining the predictions for the validation set
+
+Extract the EBVs and copy these into the working variables in `t9dat`. The order of the rows should be identical. Having got the EBVs, the `phe` can be restored to the true values. Looking at `t9dat$w.se` one can observe that the prediction errors for the validation set are larger than the training set.
+
+```{r}
+dum <- qgm_random_effects(asr9,"id")
+colnames(dum) <- c("ebv","se","z","jid") 
+t9dat[,c("w.ebv","w.se","w.z","w.jid")] <- dum
+```
+
+Restoring the phenotypes.
+
+```{r}
+t9dat$phe <- t9dat$spare
+head(t9dat)
+tail(t9dat)
+```
+
+## Questions
+
+-   Q2. Why do the s.e.s differ between individuals in the validation set and those in the training set?
+-   Q3. Write down the model equation for the model that produced `asr9` above.
+
+## Model based accuracies
+
+Consider the accuracies obtained assuming the model parameters are correct: the parameters assumed to be correct include the genetic variance and heritability (i.e. as estimated by the training set) and all the SNP effects. These are obtained as $\sqrt{1- (se^2/(V_g \ g_{ii})}$ as we have done in previous tutorials. Since individuals within sets differ we will take the mean. This is done below for the validation set (`vset`) and training set (`tset`).
+
+```{r}
+mean(sqrt(1.- t9dat[vset,]$w.se**2./(vg_hat*t9dat[vset,]$gii)    ))
+mean(sqrt(1.- t9dat[tset,]$w.se**2./(vg_hat*t9dat[tset,]$gii)    ))
+```
+
+Plot the relationships between the EBVs and TBVs (a luxury with simulated data) and we can see that the difference in accuracy, the validation set have a wider scatter.
+
+```{r}
+plot(t9dat[vset,]$w.ebv,t9dat[vset,]$tbv,col="red")
+points(t9dat[tset,]$w.ebv,t9dat[tset,]$tbv,col="grey")
+```
+
+## What NOT to do and WHY!
+
+As a demonstration of what NOT to do, and WHY, we will look at 'accuracy' by correlating the training set with their phenotypes and then scaling by the square root of $h^2$ (see Lecture 8). The 'accuracy' is a correlation (and so lies between -1 and 1) is $corr(\hat{g},g)$ and after scaling is 1.35! The 'bias' is the slope of the TBV on the EBV, and in real data this is estimated from phenotypes in one form or another, is 1.70 (s.e. 0.04). This slope should be 1 for no bias!
+
+*These estimates of accuracy from the correlation in the training set and the bias using the training set are **meaningless***! This is because the phenotypes have been used to estimate the parameters in the model and these 'best fit' parameters are explaining as much of the variation in the phenotypes as possible given the model, and so the parameter estimates become (favourably) correlated with the environmental deviations within the phenotypes - remember the estimates are linear functions of the phenotypes in the training set derived by our complex algorithms.
+
+This demonstrates the golden rule of validations: the validation set should NEVER influence the parameter estimates in any way.
+
+```{r}
+cor(t9dat$w.ebv[tset],t9dat$phe[tset])/sqrt(hh_use)
+summary(lm(phe ~ 1 + w.ebv, data = t9dat[tset,]))
+```
+
+Finally in this detailed examination, look at the estimates of accuracy and bias from the validation set - these DO have meaning! The accuracy estimated for this set is 0.469, lower than that assuming the model is correct. The regression coefficient for detecting bias is 0.816 (s.e. 0.243).
+
+```{r}
+cor(t9dat[vset,]$w.ebv,t9dat[vset,]$phe)/sqrt(hh_use)
+summary(lm(phe ~ 1 + w.ebv, data = t9dat[vset,]))
+```
+
+We can carry out a significance test for bias using the slope ($\hat{b}$). This is H0: $\hat{b}$ = 1 against H1: $\hat{b} \ne 1$. This is a 2-sided Student's t-test.
+
+-   Calculate the deviation from H0 i.e. 1: $\hat{b}-1$ = 0.816-1 = -0.184.
+-   Divide by the s.e. of $\hat{b}$ i.e. -0.184/0.243 = -0.757
+-   Compare to a t-distribution with df as shown in the `lm()` summary (2 less than the number of data points).
+-   For this 2-sided test, compare the absolute value (i.e. 0.757) to the 0.975 point for P\<0.05, to the 0.995 point for P\<0.01, and the 0.9995 point for P\<0.001 - corresponding to Type 1 errors of 0.05, 0.01 and 0.001.
+
+```{r}
+-0.184/0.243
+qt(0.975,98,lower.tail=TRUE)
+qt(0.995,98,lower.tail=TRUE)
+qt(0.9995,98,lower.tail=TRUE)
+```
+
+The conclusion is that there is no evidence of bias in this set.
+
+# Five-fold cross-validation
+
+## Setting up a data frame to collect results together
+
+We could simply repeat the code above for every set and collect the results together - that is perfectly OK. The code below is more complex, but it is done for the purpose of simplifying and presenting the work for the tutorial. It is too specific for this tutorial to be a qgm helper function.
+
+I am going to summarise some results in a separate data frame with one row for each set. From here onwards the training set outcomes will be ignored as only the results from the validation set have any validity. I include some estimates of accuracy and bias using the real TBVs for comparisons, a luxury that is not possible in real data! What is being collected is:
+
+-   `set` ... for obvious reasons;
+-   `r_m` ... the accuracy obtained from the s.e.s in the asr output, which assume the model is correct;
+-   `r_p` ... the accuracy calculated using the phenotypes of the validation set and scaling by `hh_use`;
+-   `r_t` ... the accuracy in the validation set using the true TBV;
+-   `b_p` ... the bias calculated using the phenotypes of the validation set;
+-   `b_t` ... the bias in the validation set calculated using the TBV;
+-   `hh_hat` ... the estimate of heritability in vset using tset (following Lecture 9);
+-   `hh` ... the true heritability in the validation set calculated from the variances of the TBVs and the phenotypes in the set.
+
+```{r}
+t9vs <- data.frame("set"=integer(),"r_m"=numeric(),"r_p"=numeric(),"r_t"=numeric(),"b_p"=numeric(),"b_t"=numeric(),"hh_hat"=numeric(),"hh"=numeric())
+```
+
+## Carrying out the full cross-validation
+
+In the`for` loop below the validation is carried out for each set in turn. The code is NOT important - it is not necessarily good, but it works and it simplifies the tutorial!
+
+-   The EBVs for the validation set are transferred from `w.ebv` to `ebv` so at the end `ebv` carries the EBV for each individual that was estimated when it was part of the validation set.
+-   `summary(asr9)$varcomp[1]$component[1]` extracts the estimate from the `asr9`. Normally this has been done by `qgm_summary()`
+-   `summary(lm(phe ~ 1 + ebv, data=t9dat[vset,]))$coef[2]` extracts the slope of the regression.
+
+```{r results='hold'}
+nset <- 5
+for(i in 1:nset){
+  vset <- t9dat$set==i
+  tset <- t9dat$set!=i
+  # set the phenotypes to missing for analysis
+  t9dat[vset,]$phe <- NA
+  # run analysis ... note that G1 does not have to change as it always has all individuals
+  asr9 <- asreml(fixed= phe ~ 1, random= ~vm(id,G1), residual= ~idv(units), data= t9dat,       trace=FALSE)
+  # a check just to make sure of convergence
+  asr9 <- qgm_continue(asr9,10)
+  vg_hat <- as.numeric(vpredict(asr9, vg ~ V1)$Estimate)
+  # calculate estimate of heritability within the validation set, using the estimated parameter
+  kval <- mean(diag(G1[vset,vset])) - mean(G1[vset,vset]) # mean might not be 0 for subset
+  hh_hat <- as.numeric(vpredict(asr9, hh ~ kval*V1/(kval*V1+V2))$Estimate)
+  # extract data and join to t9dat for calculations
+  dum <- qgm_random_effects(asr9,"id")
+  colnames(dum) <- c("ebv","se","z","jid") 
+  t9dat[,c("w.ebv","w.se","w.z","w.jid")] <- dum
+  # check no error is made
+  if(!identical(t9dat[,"jid"],t9dat[,"w.jid"])) {
+    print("listing error in set ",i) 
+  }
+  # store the ebv obtained for the validation set for future use
+  t9dat[vset,]$ebv <- t9dat[vset,]$w.ebv 
+  # restore the phenotypes
+  t9dat$phe <- t9dat$spare
+  # gather results for the validation set
+  dum <- t9dat[vset,]
+  t9vs[i,"set"] <- i 
+  t9vs[i,"r_m"] <- mean(sqrt(1.-dum$w.se*dum$w.se/(vg_hat*dum$gii))) # accuracy assuming model is correct
+  t9vs[i,"r_p"] <- cor(dum$phe,dum$ebv)/sqrt(hh_use) # accuracy with phenotypes and consensus hh
+  t9vs[i,"r_t"] <- cor(dum$tbv,dum$ebv) # true accuracy for validation set
+  t9vs[i,"b_p"] <- summary(lm(phe ~ 1 + ebv, data=dum))$coef[2] # the bias with phenotypes
+  t9vs[i,"b_t"] <- summary(lm(tbv ~ 1 + ebv, data=dum))$coef[2] # the true bias
+  t9vs[i,"hh_hat"] <- hh_hat
+  t9vs[i,"hh"] <- var(dum$tbv)/var(dum$phe) # true heritability in set
+  print(paste0("Finished set ... ",i))
+}
+```
+
+## Looking at the outcome
+
+The data frame below shows a summary of what was obtained.
+
+```{r}
+t9vs
+round(colMeans(t9vs[,2:8]),3)
+```
+
+## Discussion of `t9vs`
+
+We can draw some broad conclusions.
+
+-   We might generally expect that the accuracy obtained assuming the model and estimates are correct (`r_m`) will be close to the true accuracy (`r_t`) when the model used for the analysis is the true model used for the simulation, as it is here, providing the data is large enough.
+-   My expectation would be that `r_m` would be greater than `r_p` in real data, but in data simulated from the true model one might expect greater similarity between them. The averages here are very close,
+-   The validation accuracies, `r_p`, are more variable among sets than the model accuracies, `r_m`.
+-   Deviations are likely due to chance estimation errors. Both `r_m` and `r_p` have estimation errors:
+    -   `r_m` assumes all the model parameters are correct including $Vg$ (which is used for scaling), and these will have estimation errors even if the terms in the model are correct;
+    -   `r_p` will depend (i) on the phenotypes sampled with their environmental errors, and (ii) will depend on the sample size as small samples will have larger errors attached to the estimated slopes and correlations. The outcome above shows that `r_p` was more variable between sets than `r_m`. The s.e. of a simple correlation with $n$ samples is $\approx 1/\sqrt{n}$ - while this is not exact it is useful for planning!
+-   A major assumption (beyond those of our usual $P = G + E$ assumption) in genomic evaluation models is that the markers capture all the genetic variance. Typically we rely on LD of anonymous markers with the causal variants unknown, and we assume that we capture all the genetic variance. If we do not then `r_m` must be optimistic as it underestimates the total genetic variation and the phenotype is based on the full breeding value. Here $\textit{in our simulated data}$ our markers do capture all the variance.
+-   One conclusion is that both `r_m` and `r_p` are of value, and (assuming the validation set is large enough) differences are informative.
+-   The conclusion from the bias is that the EBVs show no evidence of biased, neither `b_m` nor `b_p`.
+-   `b_p` and `r_p` tend to be more variable compared to `b_t` and `r_t`, and I interpret this as being due to the variation arising from sampling the phenotypes in what is a relatively small sample size.
+
+## Summarising the EBVs collected over all the sets
+
+We summarise `ebv` in `t9dat` in three ways:
+
+-   Giving a scatter plot for all the points, coloured by set, with `ebv` on the x-axis, and either `tbv` or `phe` on the y-axis. Plotted on the same scales to make sure they are easy to compare. This is the command from `lattice` ... there are other ways.
+-   The accuracies judged by scaled phenotypes or TBV.
+-   The bias judged by scaled phenotypes or TBV.
+
+```{r results='hold'}
+xyplot(phe ~ ebv, groups=set, data=t9dat, xlim=c(-1.5,1.5),ylim=c(-3.25,3.25))
+xyplot(tbv ~ ebv ,groups=set, data=t9dat, xlim=c(-1.5,1.5),ylim=c(-3.25,3.25))
+cor(t9dat$ebv,t9dat$phe)/sqrt(hh_use)
+cor(t9dat$ebv,t9dat$tbv)
+summary(lm(phe ~ 1 + ebv, data=t9dat))$coef[2]
+summary(lm(tbv ~ 1 + ebv, data=t9dat))$coef[2]
+```
+
+Discussion of the outcomes.
+
+-   Remember we are fitting the right model for the data!
+-   The plots show:
+    -   the moderate predictive accuracy obtained explaining about 0.3 of the variance in TBV (i.e. 0.3 \~ accuracy squared).
+    -   demonstrate the extra scatter going from TBV to phenotype arising from the environmental noise;
+    -   good randomisation.
+-   The true accuracy is \~0.57 over all the data, and the complete cross-validation data was 0.54, so it is giving good guidance.
+-   The EBVs are unbiased as assessed by the TBVs, and by the cross-validation.
+
+## Questions
+
+-   Q4. Carry out a test to see if the regression of `t9dat$phe` on `t9dat$ebv` gives evidence of bias in the EBVs in the full validation set with Type 1 error =0.05.
+    -   Note this is another way of summarising the cross-validation: pooling the predicted values for each data point when it was in the validation set and look at the accuracy and bias.
+
+# Receiver Operator Characteristic (ROC) Curves
+
+## Setting up disease phenotypes
+
+ROC curves are useful when assessing a continuous predictor for use in predicting a dichotomous outcome, i.e. two categories. We will look at ROC curves by assuming that `phe` is the liability of disease risk and so that all individual above a threshold for `phe` become 'cases' (`TRUE`) and the remainder are 'controls' (`FALSE`) - that is how a liability model works, those with the highest phenotypic liability are those that succumb to the disease. In the our simulated disease all the phenotypes \>1.1 will be the diseased individuals.
+
+## Questions
+
+-   Q5. What is the incidence of the disease in our sample?
+
+```{r}
+hist(t9dat$phe, breaks='FD')
+t9dat$dis <- t9dat$phe>1.1
+head(t9dat$dis)
+sum(t9dat$dis)
+sum(is.na(t9dat$dis)) # no missing values
+sum(t9dat$dis)/nrow(t9dat) 
+```
+
+## Some helper functions for ROC curves
+
+To explore ROC curves we introduce two more qgm helper functions `qgm_roc()` and `qgm_auc()` (you can get R packages on ROC curves, but the functions are not very complicated).
+
+-   `qgm_roc()` takes in a data frame with two columns, the first is the predictor (in our case our predicted genetic values, the validation EBVs), and the second is our column of case/control data. `qgm_roc()` returns a data frame with 3 columns in the same order as the input with the predictor, sensitivity `se`, and specificity `sp` associated with the value of the predictor.
+-   `qgm_auc()` takes in the 3 columns output by `qgm_roc()` and returns the area under the curve (AUC).
+
+```{r}
+qgm_roc <- function(df) {
+  df$out_rank <- c(1:nrow(df))
+  df <- df[order(df[,1]),]
+  nill <- sum(df[,2])
+  nfit <- nrow(df)-nill
+  df$se <- 1.-cumsum(df[,2])/nill
+  df$sp <- cumsum(!df[,2])/nfit
+  return(df[order(df$out_rank),c(1,4,5)])
+}
+qgm_auc <- function(df) {
+  df <- df[order(df[,1]),]
+  df$dx[1] <- df[,3][1]
+  df$dx[2:nrow(df)] <- df[,3][2:nrow(df)]-df[,3][1:(nrow(df)-1)]
+  return(sum(df$dx*df[,2]))
+}
+```
+
+## The ROC curves
+
+The ROC curve is the plot of Sensitivity on the y-axis against 1-Specificity on the x-axis. Our validation EBVs from our data give an area under the curve of 0.699.
+
+```{r}
+epi <- qgm_roc(t9dat[,c("ebv","dis")])
+head(epi)
+plot(1.-epi[,"sp"],epi[,"se"])
+lines(x=c(0,1),y=c(0,1))
+auc <- qgm_auc(epi)
+auc
+```
+
+## Questions
+
+-   Q6. In UK we are concerned about para-tuberculosis in cows (different from bovine TB). We may guess there is genetic variation in susceptibility. Suppose the genetic predictor and ROC curve calculated above was for para-tuberculosis and, in an effort to control the epidemic, the predictor was used as a population-wide screening test for disease liability, followed with selection by banning all cows that fail the test from breeding. We wish to manage the additional costs of compensation to breeders so that at most 10% of healthy cows would be banned in error, what fraction of disease cases might you catch? Hint: use the ROC curve.
+-   Q7. Using the luxury of simulated data, give an estimate of the limit to the quality of the predictor for selection (as judged by AUC) if we were to have a much bigger training set. Hint: if we had a huge training set what would the EBVs become?
+-   Q8. How much might your answer to Q6 change with a much bigger training set?
+-   Q9. Explore the relationship of the AUC with the disease prevalence (i.e. how frequent is it in the population) by changing the threshold for disease above.
+
+# Outcomes
+
+-   We have seen how to carry out a validation using a validation set to assess accuracy and bias.
+-   We have seen how to conduct a cross-validation.
+-   We have explored different measures of accuracy.
+-   We have explored the use of ROC curves when our predictor is predicting a 0/1 outcome.

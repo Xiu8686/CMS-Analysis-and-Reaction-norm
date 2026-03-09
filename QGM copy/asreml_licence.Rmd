@@ -1,0 +1,35 @@
+---
+title: "ASReml Licence"
+author: "JAW"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+The R package can be downloaded from this website: https://asreml.kb.vsni.co.uk/asreml-r-4-download/
+You will require our site reference, VS5AA2, to access the downloads. Please use your University email.
+Select the correct package for your R version. You can also obtain the installation instructions and information on how to use the cloud licensing system from this site. To install you will require an activation code. The activation code is AGIJ-FFFF-HFCJ-BEJA
+
+```{r}
+version <- '_4.2.0.276'
+directory <- 'C:\\Users\\jwoollia\\'
+ftype <- '.zip'
+```
+```{r}
+#remove.packages('asreml')
+install.packages(paste0(directory,'asreml',version,ftype), repos= NULL, type= 'win.binary')
+library('asreml')
+```
+```{r}
+asreml.license.activate() # AGIJ-FFFF-HFCJ-BEJA
+```
+```{r}
+asreml.license.status()
+```
+```{r}
+#
+asreml.license.offline(how_many_days= 2) # ... total 30
+```
+```{r}
+asreml.license.online()
+```
+

@@ -1,0 +1,447 @@
+---
+title: "Tutorial 7: Van Raden Models"
+author: "QGM Team"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+# Introduction
+
+In this tutorial we will set and use genomic relationships in `asreml()` according to the procedures defined by Van Raden (2008). It will involve the processing of SNP markers to generate the relationship matrix and then looking at the EBVs produced. We will also look more at accuracies.
+
+It is worth noting that the data used here is small (as you will see). In general we deal with many 1,000's of SNP loci and 1,000's of phenotypes. It was shown that when we use pedigree and $\mathbf{A}$ there are rules that allow us to very quickly calculate the inverse of $\mathbf{A}$ which is needed to obtain the EBVs. Unfortunately no such rules exist for inverting $\mathbf{G}$ and inversion has to use a lot of computing power, and solutions require minutes per iteration, which waste tutorial time in waiting for computers. In Tutorial 7 we try to avoid this.
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library("asreml")
+```
+
+# QGM functions: old and new
+
+```{r qgm_functions}
+source("qgm_helpers_t7.R")
+```
+
+## Old
+
+The list below are the familiar functions we have met before.
+
+-   `qgm_summary()` for producing useful summaries of an analyis.
+-   `qgm_continue()` for a few extra iterations to obtain full convergence.
+-   `qgm_random_effects()` for extracting solutions for particular model terms.
+-   `qgm_fixed_linear()` for obtaining estimates of contrasts of fixed effects and their standard errors.
+-   `qgm_ped_summary()` for looking at pedigree structures in data.
+
+## New
+
+To carry out genomic analyses we need some new functions to simplify routine calculations from taking a set of SNP data to a genomic relationship matrix! The following are defined.
+
+-   `qgm_counts_to_freq()`. It has one parameter which is a data frame of allele counts for individuals down the rows of the data frame and SNP loci along the columns. The counts are 0, 1 or 2 corresponding to the number of a particular allele at a locus (the alternative allele). It returns a vector of mean frequencies for the alternative allele at each locus. NOTE: it assumes that all the columns are SNP loci, and not other types of data!
+-   `qgm_maf()`. It has one parameter which is a vector of frequencies for an allele at a SNP locus. It returns a vector of minor allele frequencies for the SNP loci.
+-   `qgm_vr1_to_W()`. This processes the data frame as described in the lectures for Van Raden 1 (VR1) to return a matrix $\mathbf{W}_1$ that is ready for creating the genomic relationship matrix in a following step. To successfully carry out `asreml()` we need to label the rows of the matrix with the list of identities (i.e. the row_names) and the columns with the list of names for the SNP loci (i.e. the col_names). The labels are stored in the `dimnames` attribute of $\mathbf{W}_1$ (an optional attribute of a matrix in R). So there are 3 parameters! These are in order:
+    -   the subset of the data frame corresponding to the allele counts with individuals in rows and SNP loci along the columns, as for `qgm_counts_to_freq()`;
+    -   the column of the data frame with the individual identities;
+    -   a list of names with the snp names.
+-   `qgm_vr2_to_W()`. Same as `qgm_vr1_to_W()` but creating $\mathbf{W}_2$ needed for Van Raden 2 (VR2).
+-   `qgm_W_to_G()`. This has two parameters, $\mathbf{W}$ which is assumed to be created by either `qgm_vr1_to_W()` or `qgm_vr2_to_W()`, and the corresponding scaling value appropriate for whichever of VR1 or VR2 is being used. It returns the corresponding genomic relationship matrix $\mathbf{G}$ with rows and columns labelled with the list of identities in its `dimnames` attribute of $\mathbf{G}$.
+-   `qgm_missing_snp()`. The creates a report on missing genotypes. It has two parameters the data frame and the list of column numbers containing genotypes.
+
+# Reading in genotypes
+
+## Exploring some genotypes
+
+Read in the file of genotypes `rgen7.csv`. From the head and tail of the data frame it seems to be a standard file of genotypes represented as 0's, 1's and 2's. The file has many columns, so I have limited the number of columns! It is quite common to see biallelic (e.g. SNP) genotypes presented as counts of a particular allele. I will use the terminology of 'reference' and 'alternative' alleles so that 0, 1 and 2 refers to the number of alternative alleles. (In QGM the reference alleles are randomly chosen from the pair as it helps (my) 'statistical' thinking as then LD between neighbouring SNPs are equally likely to be +ve or -ve).
+
+```{r}
+t7gen <- read.csv(file="rgen7.csv",header=TRUE,na.strings=c("NA"))
+head(t7gen[,1:8])
+tail(t7gen[,1:8])
+```
+
+Explore the data to understand its structure and quality. For example:
+
+-   How many individuals listed?
+-   Are there any duplicate identities?
+    -   If there are, that can cause problems. In QGM, any duplicate genotyping will be unintended!
+-   How many columns are there in the data?
+-   How many of these are SNP loci?
+    -   Helpfully, these are labelled SNP!
+-   Are all the SNP loci next to each other?
+    -   If they are not then we need to take care processing. In QGM this will not be a problem, but sometimes labs can do differently.
+
+```{r}
+nrow(t7gen) # records
+length(unique(t7gen$id)) # number of distinct ids
+ncol(t7gen) # columns
+length(colnames(t7gen)) # is an alternative to ncol(t7gen)
+```
+
+The column name issue is harder! `grep("snp",colnames(t7gen))` will list them but that will be a long list!
+
+```{r}
+snps <- grep("snp",colnames(t7gen),ignore.case=TRUE) # a list of columns containing "snp" or "SNP"
+snps[1:10] # listing first 10 columns with "snp"
+length(snps) # number of columns with "snp"
+colnames(t7gen)[-snps] # list columns which aren't included in the "snp" columns
+which(colnames(t7gen) %in% colnames(t7gen)[-snps]) # lists column numbers without "snp"
+```
+
+## Missing genotypes
+
+So there are 500 SNP loci in columns 2 to 501. An important aspect of genotype quality is the number of missing genotypes for each locus. In QGM dealing with missing genotypes is beyond our scope, so while the code below simply looks for them. Creating a name for SNP columns is a useful tip `loci <- c(2:501)`.
+
+It can help to create a list of the loci for use in code.
+
+```{r results='hold'}
+loci <- c(2:501)
+```
+
+A qgm helper function is provided for summarising the missing genotypes by locus and identity. In QGM missing values will not feature greatly. `qgm_missing_snp()` takes two arguments, the full data frame and the list of loci i.e. the variable `loci` as above. It produces simple summaries.
+
+```{r}
+qgm_missing_snp(t7gen,loci)
+t7gen[1:10,1:8]
+```
+
+I introduced these missing genotypes for a demonstration of the issue and one of the needs for QC of genotypes. In fact, all the missing genotypes were 0, so we will simply re-instate the value 0. Dealing with QC in practice is not covered in QGM.
+
+```{r}
+t7gen[,loci][is.na(t7gen[,loci])] <- 0  # this identifies all elements that are NA and sets to 0
+t7gen[1:10,1:8]
+qgm_missing_snp(t7gen,loci)
+```
+
+# Genotype frequencies
+
+Let us look at the genotypes we have: calculate the frequencies and look at their distribution. One can see that for this simulated data the MAF are all \> 0.25, which helps make the data informative in this small simulated example.
+
+```{r results='hold'}
+aaf <- qgm_counts_to_freq(t7gen[,loci])
+hist(aaf,breaks='FD')
+```
+
+```{r results='hold'}
+maf <- qgm_maf(aaf)
+hist(maf,breaks='FD')
+```
+
+Ordinarily, one might proceed to test each loci for Hardy-Weinberg equilibrium (HWE), but the difficult question is what it means, and what is done after the testing. We will not cover testing for HWE and pruning practices of SNPs (and if they are sensible) in QGM.
+
+## Questions
+
+-   Q1. A question from QG! What would you expect to see if the population is produced by random mating of males and females. Do you expect it to see HWE, more heterozygotes than predicted by HWE, or fewer heterozygotes than predicted by HWE?
+-   $\mathbf{Answer.}$ With random mating of males and females one does not obtain HWE, but will tend to have more heterozygotes than predicted as overall relatives are being avoided because selfing is avoided, although this effect diminishes with larger mating populations. There are (at least) 3 reason for genotypes not being in HWE: (i) non-random mating; (ii) selection post mating; (iii) genotyping errors. Item (iii) is certainly a reason for removing a locus but one would expect systematic genotyping erors to be infrequent across the genome in modern times with routinely used SNPs. Item (i), non-random mating, can occur through the spatial effects on populations or mating preferences and will tend to be observed across the genome. Item (ii) is likely to be relatively infrequent across the genome with SNP marker data. Therefore to what degree loci should be removed for departure for their degree of departure from HWE may depend on the objective of the study and the status of the SNPs (i.e. a new untested assay or routine, causal SNP or anonymous markers) but assuming the expectation to be no departure from HWE is unreasonable for reason (i)!
+
+# Calculation of genomic relationships
+
+In QGM we produce the Van Raden matrices using the functions provided as described above. For both we calculate them in two steps:
+
+-   calculate the design matrix for the model $\mathbf{W}$;
+-   calculate $\mathbf{G}$ from the appropriate $\mathbf{W}$ and the appropriate scaling coefficient ($s$) by $\mathbf{W W}^T/s$.
+
+## Van Raden 1
+
+We will look at VR1. To get $\mathbf{G}_1$, we first need to obtain $\mathbf{W}_1$ using `qgm_vr1_to_W()`, supplying names for the rows (identities), and columns (SNP names). $\mathbf{W}_1$ has dimensions (\# ids x \# SNPs), which is (100x500) in this example. Then $\mathbf{G}_1$ can be calculated using `qgm_W_to_G()`, we have no need to supply names of rows and columns as the input matrix $\mathbf{W}_1$ already has this information. $\mathbf{G}_1$ should have dimensions (\# ids x #ids) - it is square as it is a (co)variance matrix, and it is giving the relationships among all individuals.
+
+The scaling coefficient for $\mathbf{G}_1$ is the sum of HWE heterozygote frequencies over all the loci. i.e. is $\sum_{loci} 2p_j(1-p_j)$ and this can be calculated using `qgm_counts_to_freq()`. Note $\mathbf{W}_1$ itself does not assume HWE although its scaling does.
+
+```{r}
+W1 <- qgm_vr1_to_W(t7gen[,loci],t7gen$id,colnames(t7gen[,loci]))
+print("Matrix W1 dimensions")
+dim(W1) # a check
+aaf <- qgm_counts_to_freq(t7gen[,loci])
+cc <- sum(2.*aaf*(1.-aaf))
+G1 <- qgm_W_to_G(W1,cc)
+print("Matrix G1 dimensions")
+dim(G1) # check
+```
+
+We can look at the histogram of all relationships ...
+
+```{r}
+hist(G1,breaks='FD')
+```
+
+We can look at diagonal elements of $\mathbf{G}_1$ using the function `diag()`: for example
+
+```{r}
+hist(diag(G1),breaks='FD')
+```
+
+... and print out a subset, individuals 1 to 6.
+
+```{r}
+G1[1:6,1:6]
+```
+
+## Questions
+
+-   Q2. There are two groups of values. What do there groups represent?
+-   $\mathbf{Answer.}$ There is a cluster around 1 and a cluster around 0. The first cluster come from the leading diagonal, i.e. relationships of individuals with themselves $g_ii$, and the second cluster come from the off-diagonal, i.e. relationships between distinct individuals. With 100 individuals there are 100 values on the leading diagonal but many more off-diagonal values 99.100 = 9,900, although these are 4,950 values duplicated as the matrix is relationship symmetric.
+-   Q3. Describe two unusual features that would not be present in the Numerator Relationship Matrix.
+-   $\mathbf{Answer.}$ (i) negative values; (ii) values on the leading diagonal \< 1.
+
+Use the code block below to calculate the following:
+
+-   Q4. The mean relationship of an individual with itself for this data.
+-   $\mathbf{Answer.}$ 0.996
+-   Q5. The scaling factor that is required for obtaining $\mathbf{G}_1$ using Van Raden 1, i.e. $c^2$. (Hint, this is a function of the allele frequencies.)
+-   $\mathbf{Answer.}$ 238.4
+-   Q6. What is the sum of each column of $\mathbf{G}_1$?
+-   $\mathbf{Answer.}$ 0. What is shown are rounding errors ($10^{-15}$!). This is because the matrix of counts has been centred so all the columns of $\mathbf W_1$ sum to zero, which then means that all the columns of $\mathbf G_1$ sum to 0 ... and all the rows of $\mathbf G_1$ sum to 0.\
+-   Q7. What is the sum of each row of $\mathbf{G}_1$?
+-   $\mathbf{Answer.}$ 0. See Q6.
+-   Q8. What is the sum of all the elements of $\mathbf{G}_1$?
+-   $\mathbf{Answer.}$ 0. Sum of all the elements is the sum of the column sums which are all 0.
+-   Q9. What happens when you try to invert $\mathbf{G}_1$?
+-   $\mathbf{Answer.}$ It fails ... well, it doesn't look good, `solve()` tries its best but it doesn't work.
+
+```{r}
+mean(diag(G1),na.rm=TRUE) # Q4 
+cc <- sum(2.*aaf*(1.-aaf)) # Q5 ... already calculated above
+cc # Q5
+colSums(G1,na.rm=TRUE,dims=1)[1:7] # Q6
+rowSums(G1,na.rm=TRUE,dims=1)[1:7] # Q7
+sum(G1) # Q8
+solve(G1)[1:7,1:7] #Q9
+```
+
+## Inversion of G1
+
+Inverting $\mathbf{G}$ (VR1 or VR2) does not give sensible answers, and in fact cannot be inverted! Technically, this is because $\mathbf{G}$ is not positive definite, it is positive semi-definite, it has an eigenvalue of 0. This can be observed because the rows (and columns) sum to zero i.e. there is a linear relationship among the row (and columns), as seen in Q6 and Q7 (what you obtain are simply rounding errors for 0). Why? We subtracted the mean frequency for each locus!
+
+So what can one do, as the standard solution methods require $\mathbf{G}^{-1}$. There are two options:
+
+-   employ some more computer intensive methods that solve the equations without inversion.
+-   make a small adjustment to G to make it positive definite. Typically one can add a small value to the leading diagonal.
+
+In this example, we take the second option and add 0.001 to the leading diagonal. In practice, not all individuals have genotypes for all loci, and the procedures for calculating the genomic relationship in this case (not covered in this course) can result in invertible matrices at the undesirable cost of removing the property of positive semi-definite with the occurrence of small negative eigenvalues that are usually ignored (for better or worse). A true $\mathbf{G}$ should be positive semi-definite.
+
+See below ... we will delete `Ginv` at the end of the block ... now we can invert $\mathbf{G}$ and it does what it should do, i.e. $\mathbf G \mathbf G^{-1} = \mathbf I$.
+
+```{r results='hold'}
+G1 <- G1 + 0.001*diag(nrow(G1))
+G1inv <- solve(G1)
+isI <- G1%*%G1inv
+isI[1:7,1:7]
+rm(G1inv,isI)
+```
+
+## Van Raden 2
+
+We will calculate $\mathbf{G}$ by VR2 ($\mathbf{G}_2$) as well. To get $\mathbf{G}_2$ we will first need to obtain $\mathbf{W}_2$ using `qgm_vr2_to_W()`, supplying names for the rows (identities), and columns (SNP names) as for VR1. The scaling coefficient for $\mathbf{G}_2$ is the number of loci. Note $\mathbf{W}_2$ does assume HWE in re-weighting the loci by normalising the columns.
+
+```{r}
+W2 <- qgm_vr2_to_W(t7gen[,loci],t7gen$id,colnames(t7gen[,loci]))
+G2 <- qgm_W_to_G(W2,length(loci))
+G2 <- G2 + 0.001*diag(nrow(G2))
+```
+
+We can plot them against each other ... not much difference
+
+```{r}
+plot(G1,G2)
+```
+
+# Reading in the data!
+
+The data is very simple: 100 observations of a single phenotype, 1 observation for each identity, same identities as in `t7gen`.
+
+```{r}
+t7dat <- read.csv(file="rdat7.csv",header=TRUE,na.strings=c("NA"))
+head(t7dat)
+tail(t7dat)
+nrow(t7dat)
+length(unique(t7dat$id))
+```
+
+# Van Raden 1 Model
+
+## Fitting the model
+
+In this data there are no fixed effects other than the mean and no other random effects other than the `id`. We know how to include any fixed effects into our models, describing them in model equations, fitting and testing them; likewise we know how to include additional random effects into the models. $\textit{It does not matter whether random genetic terms are genomic or pedigree the process for handling fixed or random effects is unchanged}$!
+
+Here - unlike in real life, $\textit{and perhaps assessments(!)}$ - the simulated genomic data in the tutorial has no fixed effects and no other random effects; this is to keep the focus on the genomic parts of the model. So in this simple data only 1 factor needs to be declared i.e. `id`. R does things to columns that are declared as factors, and if we wish to use them later we often need to 'de-factor' them which is unfortunately not a simple function call! In QGM we are taking the easy option and duplicating the `id` and creating `jid`. When creating the factor from `id` it can sort the data frame differently when displaying it, and for ease of viewing, I want it to be able to keep the levels ordered as they already are i.e. in numerical order. $(\textit{In QGM such R technicalities will be dealt with in the instructions, if needed.})$
+
+```{r}
+t7dat$jid <- t7dat$id # a duplicate for future use
+t7dat$id <- factor(t7dat$id,ordered=TRUE) # the factor
+head(t7dat)
+```
+
+Running `asreml()` is the same as previously except that the term for `id` is now `vm(id,G1)` for VR1 (or `G2` for VR2). I have added a few cycles of `qgm_continue()` to help convergence - note its usage `asr7 <- qgm_continue(asr7,10)`, if you don't put the `asr <-` it cycles with a lot of printing and fails to update the `asr7`! There are no additional fixed effects but these would be simply added to the `fixed=` term as usual; ditto, random effects and `random=`.
+
+```{r}
+asr7_1 <- asreml(fixed= phe ~ 1, random= ~vm(id,G1), residual= ~idv(units), data= t7dat )
+asr7_1 <- qgm_continue(asr7_1,10)
+```
+
+## Questions
+
+-   Q10. Write down the model formula for the analysis.
+-   $\mathbf{Answer.}$ Model is $\mathbf{y} = \mathbf{1}\mu + \mathbf{Zu} + \mathbf{e}$ where
+    -   $\mathbf{y}$ is (100x1) vector of phenotypes
+    -   $m$ is a scalar (i.e a single number) fitted mean
+    -   $\mathbf{1}$ is a (100x1) vector of 1's, the design 'matrix' for the mean
+    -   $\mathbf{u}$ is a (100x1) vector of breeding values assumed to be random effects and distributed $MVN(0, V_g \mathbf{G}_1)$, where $\mathbf{G}_1$ is the Genomic Relationship matrix, calculated following Van Raden 1, and $V_g$ is the additive genetic variance.
+    -   $\mathbf{Z}$ is the (100x100) design matrix for the breeding values $\mathbf{u}$
+        -   the first 100 is the number of data points, the second the number used to calculate $\mathbf{G}$, they are the same here
+        -   in this data $\mathbf{Z}$ happens to be the identity matrix $\mathbf{I}_{100}$
+    -   $\mathbf{e}$ is a (100x1) vector of residuals assumed to be random effects and distributed $MVN(0, V_e \mathbf{I})$, where $\mathbf{I}$ is the (100x100) identity matrix and $V_e$ is the residual variance.
+
+## Look at the output ...
+
+```{r}
+qgm_summary(asr7_1)
+```
+
+## Questions
+
+The methods do not change from previous tutorials so ...
+
+-   Q11. Calculate LRT of the null hypothesis H0: Vg =0 with an alternative H1: Vg \>0 with Type 1 error 0.05. Remember the data is small!
+-   $\mathbf{Answer.}$ Full model above: logL1 = -48.6703; Reduced model below: logL0 = -49.038; Test statistic = 2x(49.038-48.670) = 2x0.368 = 0.736 on $\chi_1^2$; For Type 1 error 0.05, the critical value is the 90% value, 2.706. Therefore accept H0 and there is no evidence Vg\>0 (P\>0.05).
+
+```{r}
+red7_1 <- asreml(fixed= phe ~ 1, residual= ~idv(units), data= t7dat )
+red7_1$logl
+qchisq(0.90,1,lower.tail=TRUE)
+```
+
+-   Q12. Calculate the heritability for `phe` using Vg as the measure of additive genetic variance.
+-   $\mathbf{Answer.}$ The estimate is 0.244 (s.e. 0.305)
+
+```{r}
+vpredict(asr7_1, hh ~ V1/(V1+V2))
+```
+
+# Van Raden 2
+
+## Fitting the model and looking at the output
+
+Doing the same with $\mathbf{G}_2$
+
+```{r}
+asr7_2 <- asreml(fixed= phe ~ 1, random= ~vm(id,G2), residual= ~idv(units), data= t7dat)
+asr7_2 <- qgm_continue(asr7_2,10)
+qgm_summary(asr7_2)
+```
+
+## Questions
+
+-   Q13. For this analysis, would you amend your answer to Q10, and if so, how?
+-   $\mathbf{Answer.}$ A small but important change for $\mathbf{u}$:
+    -   $\mathbf{u}$ is a (100x1) vector of breeding values assumed to be random effects and distributed $MVN(0, V_g \mathbf{G}_2)$, where $\mathbf{G}_2$ is the Genomic Relationship matrix, calculated following Van Raden 2, and $V_g$ is the additive genetic variance.
+
+# EBVs from Van Raden 1 & 2
+
+Extracting the set of EBVs from Van Raden 1 and putting them into a data frame `gbv`, removing and re-ordering the columns, and adding the phenotypes to the data frame from `t7dat`.
+
+```{r}
+gbv <- qgm_random_effects(asr7_1,"id")
+colnames(gbv) <- c("ebv1","se1","z","jid")
+gbv <- gbv[,c(4,1:2)]
+gbv$phe <- t7dat[gbv$jid,]$phe
+gbv$g1_diag <- diag(G1)
+head(gbv)
+```
+
+Extracting the EBVs for VR2, so that the phenotype and the EBVs are in the same data frame.
+
+```{r}
+dum <- qgm_random_effects(asr7_2,"id")
+colnames(dum) <- c("ebv2","se2","z","jid")
+gbv$ebv2 <- dum[gbv$jid,]$ebv2
+gbv$se2 <- dum[gbv$jid,]$se2
+gbv$g2_diag <- diag(G2)
+head(gbv)
+```
+
+Note there is not much difference in EBVs between VR1 and VR2. This is a common experience and it is not just because of the small dataset!
+
+```{r}
+plot(gbv$ebv1,gbv$ebv2)
+```
+
+# Accuracies
+
+## Calculation of accuracies
+
+Let us look at accuracies that come out of the analysis. We need to use the genetic variances that come from the analyses which were 0.230 and 0.222 for VR1 and VR2 respectively.
+
+```{r}
+gbv$acc1 <- sqrt(1.-(gbv$se1**2.)/(gbv$g1_diag*0.230))
+gbv$acc2 <- sqrt(1.-(gbv$se2**2.)/(gbv$g2_diag*0.222))
+summary(gbv$acc1)
+summary(gbv$acc2)
+```
+
+## Simulated data have True Breeding Values (TBVs) ...
+
+One benefit of simulated data is that the TBVs ($g$) are known! Remember that the accuracy is defined as the $corr(\hat{g},g)$ where $g$ is the TBV. So if we know the TBVs we can see how we are doing! I will also include the phenotype `phe`
+
+```{r}
+dum <- read.csv(file="rtbv7.csv",header=TRUE,na.strings=c("NA"))
+gbv$tbv <- dum[gbv$jid,]$tbv
+plot(gbv$ebv1,gbv$tbv)
+```
+
+```{r}
+cor(gbv[,c("ebv1","ebv2","phe","tbv")])
+```
+
+## Comments on accuracies from training sets
+
+When we talk about accuracies of prediction such as `gbv$acc1` and `gbv$acc2` using the s.e.s we need to remember that we have calculated these from the training set and ASSUMING the model is CORRECT. The formula we use is based on the model and the parameters we obtain from the data after fitting the model. The 'training set' is the set of data used to calculate the parameters - the heritability, marker effects etc - and is sometimes referred to as the 'reference set' and 'set' is sometimes called 'population'.
+
+When you fit models to the training data to estimate parameters, the parameters are estimated to fit the training data that is offered to the maximum possible degree, e.g. we often speak of 'best fit to the data'. Any features specific to the training set will 'bias' those parameter estimates towards the training set and away from a validation set of different individuals. Therefore we should anticipate accuracies obtained for the training set (the 0.52 in `gbv$acc`) may overestimate those for the validation set, so are optimistic. After all it assumes the model is correct! And all models are wrong!
+
+## ... and validation sets
+
+The 'validation set', sometimes called 'test set', is the set of individuals being predicted, but are not in the training set. In breeding, for example, we would like to predict breeding values of newborn animals; in medical genetics, we wish to predict the genetic disease risk over life in young and seemingly healthy individuals. Therefore we use a training set to estimate parameters and use these parameters for prediction of other individuals in the population, and it is the accuracy in this 'validation set' that is the most important value! The validation set must not be used for estimating the parameters, and so will need to be a set of phenotypes distinct from the training set, and this will be covered in a later lecture.
+
+## Questions
+
+-   Q14. The table above gives the correlation between the true breeding value and the phenotype is 0.688. What is the heritability of the phenotype? (A QG question!)
+-   $\mathbf{Answer.}$ The correlation is $h$, so $h^2$ = 0.688 x 0.688 = 0.473.
+-   Q15. What is the true genetic variance in our data?
+-   $\mathbf{Answer.}$ 0.5. The $h^2$ estimate from the ratio of genetic to phenotypic variance is 0.529 different from 0.471, but they are not identical estimators and are differently influence by chance covariances between the genotype and environmental influences..
+
+```{r}
+var(gbv$tbv)
+var(gbv$tbv)/var(gbv$phe)
+```
+
+## Some Notes
+
+### Reconciling the model-based accuracies with the actual value in our data
+
+-   The correlations with the EBV with the TBV suggest the accuracies of our training set EBVs are 0.73, higher than estimated above - despite my caution that they are likely overestimates. Why? Accuracies always depend on:
+    -   how good the model is of the underlying biology - in this simulated data, it is correct!
+    -   how well do we know the parameters - here they are being estimated with small data but are assumed to be correct.
+-   In this small data, one reason for the estimates of accuracy being lower than the actual value is the estimate of heritability is lower in magnitude than the true value - the estimate is \~ 0.24 but the TBV tell us that the heritability is 0.688 squared i.e. 0.47, as the correlation between TBV and phenotype is $h$. Therefore the model's parameters, assuming the estimates are correct, imply the records are much less informative than they actually are.
+    -   The difference between the estimated and true $h^2$ is not large compared to the s.e. of the estimate.
+-   In real life, we do not have TBV!
+-   In real life, there is no guarantee the markers will capture all the genetic variation.
+
+### BEWARE correlation of EBVs with phenotypes from TRAINING SETS
+
+Correlations between the phenotype and the EBV in the training set need to be interpreted with considerable care! Here the correlations are 0.94, quite close to 1, and superficially that seems encouraging! BUT if we had an excellent model for the TBV, THEN we should expect the correlation between EBV and phenotype to equal 0.687, i.e. the correlation of TBV with phenotype, and definitely NOT close to 1.
+
+It is very easy to show that weak data gives correlations between EBVs and phenotypes from the training set close to 1. Suppose we have a trait with known $h^2$ and we have a group of unrelated individuals with no offspring and only phenotypes recorded then the only estimate of EBV is $\hat{g} = h^2 P$, i.e. simply scaling the phenotype, so the correlation between the EBV and the phenotype in this training set is $corr(\hat{g},P)=1$. The true accuracy is $h$, the square root of $h^2$ - very different - so such an assessment does not say much about the predictive quality of the model.
+
+# Outcomes
+
+-   We have explored genotype data for multiple SNPs.
+-   we have constructed (invertible) genomic relationship matrices, Van Raden 1 and Van Raden 2.
+-   We have fitted these to data using `asreml` to carry out a genomic evaluation.
+-   We have explored the differences (or lack of) between Van Raden 1 and Van Raden 2.
+-   We have introduced the ideas of training and validations sets, and the importance of this distinction for predictive accuracy.

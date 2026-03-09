@@ -1,0 +1,346 @@
+---
+title: "Tutorial 5: Aviagen Data"
+author: "QGM Team"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Some libraries that have been met before. The QGM helper functions have not changed from Tutorial 4.
+
+```{r}
+library("asreml")
+library("ggplot2")
+library("GGally")
+library("gridExtra")
+source("qgm_helpers_t5.R")
+```
+
+# Background
+
+The data today is real data from Aviagen plc, a global breeding company for chickens. The QGM Team thank Aviagen for providing this data to us. It concerns the body weight of chicks at 35 days and egg production of the mature female in a single line over 6 years. Some themes of the tutorial are:
+
+-   All models are wrong but some models are more wrong than others
+-   A genetic model is only as good as its environmental model
+
+## Objective
+
+The **objective** for the analysis is to estimate from a bivariate analysis:
+
+i.  the heritability of each trait;
+ii. the additive genetic correlation between the two traits ($r_A$); and
+iii. the environmental correlation between the two traits.
+
+## Data and pedigree files
+
+The **data** is in file `gen_avi.csv` and has the following information (missing is coded *`NA`*):
+
+i.  *id* self-explanatory
+ii. *sire* self-explanatory
+iii. *dam* self-explanatory
+iv. *sex* male 1, female 2
+v.  *pou* this will **not** be used     
+vi. *hw* hatch week of chick
+vii. *dage* age of the individual's dam in weeks when it was hatched
+viii. *bwt* body weight at 35 days in grams
+ix. *eggs* total number of eggs laid.
+
+```{r}
+gen <- read.csv(file="gen_avi.csv",header=TRUE,sep=",",na.strings=c("NA"))
+head(gen)
+```
+
+The **pedigree** is in the file `ped_avi.csv` and has the following information (missing is coded *`NA`*) :
+
+i.  *id* coded as in data
+ii. *sire* the *id* of the sire
+iii. *dam* the *id* of the dam
+iv. *use* appears as sire 1, as dam 2, and not a parent 0.
+
+```{r}
+ped <- read.csv(file="ped_avi.csv",header=TRUE,sep=",",na.strings=c("NA"))
+head(ped)
+```
+
+## Questions
+
+**Q1.** What model would you recommend? **... the primary task**.
+
+**Q2.** What genetic parameters do you get after fitting? **... if you have time.**
+
+# Exploring data
+
+## A trellis plot ...
+
+```{r warning= FALSE, message= FALSE, progress= FALSE}
+ggpairs(data = gen[,c("hw","dage","bwt","eggs")], diag= list(continuous= "bar",
+        breaks= 'FD'), lower= list(continuous= wrap(ggally_points, size= 0.01,
+        alpha= 0.1)))
+```
+
+The plot above shows some things to think about.
+
+-   `bwt` is bi-modal! Hopefully this will be explained by some large fixed effect in our data i.e. the model will explain it, but we should keep watch! Experience says this is likely to be a sex effect.
+-   The plot of `bwt` against `hw` looks as if something is happening half-way through the period.
+    -   *Something to ask the data providers!*
+    -   *Need to take care when modelling the environmental trend in `bwt` with `hw`.*
+-   A point that is clearer in the histograms is that `eggs` is rather skew. We may wish to address this but that will be left until later here.
+-   The plot picks up some other points which we may wish to note e.g. `dage` appears to have only relatively few values (9).
+-   `hw` has 286 unique values ...
+
+```{r}
+length(unique(gen$hw))
+```
+
+## A two-way table ...
+
+```{r}
+addmargins(table(gen$sex,gen$dage))
+```
+
+There are two columns that may be categorical `sex` and `dage` and the counts are easily tabulated.
+
+-   `sex` is a classic fixed factor;
+-   With 8868 females and 2256 males, the sex ratio is 4:1 in favour of females. Why not 1:1? Is the data selected, and if so how?
+    -   *Something else to ask the data provider!*
+    -   *If unanswered the potential for bias should be noted in summaries of analyses.*
+-   `dage` is something that I would consider fitting as a continuous function, as I expect the true impact to be a smooth curve of some form although I only have 9 points to model it.
+-   The distribution of `dage` for males and females appear similar.
+
+The code below shows the number of non-missing records for each column of the data frame. It appears that only `eggs` has missing data; however this is entirely due to the 2256 males not laying eggs.
+
+-   `is.na(df)` tests every element of data frame `df` for `NA`, with `NA` being TRUE
+-   `!is.na()` negates the answer so `NA` is now FALSE
+-   R will interpret TRUE as 1 and FALSE as 0, so `colSums(!is.na(gen))` counts the number of rows that are not missing for every column.
+```{r}
+colSums(!is.na(gen))
+```
+
+## Some raw means and s.d.'s ...
+
+```{r}
+summary(gen$bwt)
+sd(gen$bwt, na.rm=TRUE)
+summary(gen$eggs)
+sd(gen$eggs, na.rm=TRUE)
+```
+
+-   The `summary(gen$eggs)` shows that all females have `eggs`\>0, which is unusual, as my experience tells me that there will be hens that do not lay. So have these hens been removed?
+
+    -   *Something else to ask the data provider!*
+        -   The answer is yes, the zeros have been removed, and this will introduce a bias.
+        -   Remember to point out to readers about possible biases caused by their removal.
+        -   (Having the zeros might complicate the modelling, depending on their frequency!)
+
+## Histograms...
+
+```{r}
+hist(gen$bwt,breaks='FD')
+hist(gen$eggs,breaks='FD')
+```
+
+-   We have already noted the bi-modality of `bwt`.
+-   `eggs` appears to have a notable -ve skew. This introduces the issue of what to do (e.g. transformations). One can debate a long time over the issues! No action now, and addressed later.
+
+## Genetic structure in data
+
+```{r}
+qgm_ped_summary(gen)
+```
+
+-   The data on body weight has no repeated records, therefore we have no need to model permanent environment!
+-   All individuals have sire and dam recorded.
+-   The recorded data comes from 636 sires mated to 2153 dams \~ 3.4 dams per sire, with the maximum number of dams per sire was 11
+-   The mating is not quite hierarchical as there are more mating pairs than 2153, but dams are mated to at most two sires.
+-   Full-sib family size in the data varied between 1 and 45 with the average given by 11124/2183 \~ 5.1.
+-   At least one sire has 99 offspring in the data but the average was 11124/636 \~ 17.5.
+-   At least one dam has 45 offspring in the data but the average was 11124/2153 \~ 5.2.
+
+The females recorded for eggs can be examined using `qgm_ped_summary(gen[!is.na(gen$eggs),])`.
+
+## ... and pedigree
+
+```{r}
+qgm_ped_summary(ped)
+```
+
+-   It seems that most individuals in the pedigree have data there are only 361 additional individuals.
+-   None of the 361 individuals have pedigree so they belong to the base generation.
+-   One question is whether all sires and dams of individuals in `gen` are in `ped`, as we would expect.
+    -   the code is not expected to be reproduced in QGM tests ...
+
+    -   ... and the code below shows that all sires and dams are all included in the pedigree
+
+```{r}
+in_ped <- as.list(ped$id)
+unique(gen[!(gen$sire %in% in_ped),]$sire)
+unique(gen[!(gen$dam %in% in_ped),]$dam)
+```
+
+-   In the base generation of 316 there are 86 sires and 275 dams ... see below
+
+```{r}
+table(ped[is.na(ped$sire),]$use)
+```
+
+# Model terms
+
+## y-variates
+
+We need a bivariate model to estimate a genetic correlation. The traits we have are `bwt` and `eggs`. So the model will have `cbind(bwt,eggs)` as the 'y' part of the model and `trait` for the fitted mean in the fixed terms.
+
+## Parameters of interest
+
+The objective focuses solely on the genetic parameters. so to address the objective `id` will e declared as a factor and the term `corgh(trait):vm(id,ainv)` will appear in the random part of the model. The objective is specific about the correlation, so I fit `corgh()` rather than `us()` as it feels more direct.
+
+-   It does not matter whether `corgh()` or `us()` is used, as they are equivalent. In the latter the correlation will need to be calculated after fitting with `vpredict()`. Sometimes in complex models one may converge more easily than the other, which is worth remembering if obtaining convergence is difficult.
+
+## Nuisance parameters
+
+### `sex`
+
+Clearly one issue is that only females produce eggs and therefore no term is needed. For `bwt` this is needed. The effect of `sex` is expected to systematic and broadly repeatable across trials, and so should be fitted as fixed if required. Therefore `sex` will be declared as a factor, and the fixed part of the model will contain `at(trait,1):sex` which fits 1 d.f. for sex only to trait level 1, i.e. `bwt`.
+
+### `dage`
+
+This is a systematic effect. With 9 dam ages it is straightforward to remove the effect of this nuisance parameter by declaring `dage` to be a factor with a term `trait:dage` with 16 d.f. (8 for each trait) in the fixed part of the model. This is completely compatible with the objectives. If writing a report, or for reasons of scientific curiosity one may wish to see what kind of relationship the age of the dam has on each trait. If fitted simply as `dage` then one can plot the fitted values with their s.e.s and then comment vaguely on curvilinearity - but more can be done. An equivalent and more informative model is to replace `dage` with `pol(dage)` without declaring it as a factor, which fits 'orthogonal polynomials' to the 9 points and so gives information on whether linear, quadratic or higher degree polynomials cubic terms adequately describe the effects. Therefore, to illustrate this, I am putting `trait:pol(dage,8)` into the fixed model, which fits polynomials up to degree 8 for each trait - this is perhaps excessive but it is then an equivalent model to fitting `dage` as a simple factor. 
+
+### `hw`
+
+This is an environmental time trend which may have some systematic components (e.g. seasonal) and would not be expected to be entirely random (i.e. each term randomly drawn from a MVN distribution, and very unlikely to be $MVN(0,V\mathbf{I})$ for some variance V). It has many levels which would add to computational effort (just an inconvenience!), and as a long term time trend is confounding genetic trends, so fitting `hw` as fixed effect with 285 d.f. may reduce the power of uncovering the genetic parameters, which could be recovered *if* it were reasonable to make the assumption of randomness in some form (remember the recovery of 'inter-block information' of Paterson & Thompson, here the hatch weeks are our blocks). So what can be done?
+
+-   It is *not wrong* to declare `hw` as a factor and added to the fixed part of the model, with the defence of being unwilling to make the assumption of randomness. However it is possible to do more and hence recover some of the information.
+    -   It would be *wrong* to simply add `hw` to the random part of the model as it clearly has systematic elements requiring to model.
+-   Below I have modelled `hw` by using 'smoothing splines', which draw smooth curves through points without any polynomial assumptions. Further the methodology is technically very suited to being fitted in mixed models! **The splines are used to illustrate what is possible - splines play no part in assessment.**
+    -   First, setting up the splines in the model for a univariate model is straightforward: (a) keep `hw` as a covariate (i.e. treat it a as a continuous measure of time) and so do *not* declare `hw` as a factor; (b) add `hw` to the fixed part of the model, i.e. as a linear regression with 1 d.f.; (c) add `spl(hw)` to the random part of the model. Both the terms in (b) and (c) *must* appear in the model when fitting the splines. To fit it in this bivariate model `trait:hw` goes into the fixed part and `idh(trait):spl(hw)` in the random part.
+        -   I do *not* fit a covariance e.g. `corgh(trait):spl(hw)`; this allows the smoothing in the trait to proceed independently of each other.
+    -   Second, address the question of whether or not the smooth curve will explain all the effect of `hw`. As mentioned in the Lecture 5, the same effect can be described by multiple terms, so having taken out a systematic trend in a very general way it is perhaps reasonable to assume that any further effects may be described by $MVN(0,V\mathbf{I})$. To add this to the model, create a copy of `hw` and call it `jhw` (j for John!), which is then declared as a factor and added to the random part of the model. In the bivariate model `corgh(trait):jhw` is added to the random part.
+-   There are reasonable alternatives suggested by the data. The answer to the question of why the sudden change in the bodyweight is that there was a change in diet introduced. So one possibility is to introduce a new factor, `period` with 2 levels corresponding to pre- and post the change in diet and fit that as a fixed effects. There may be additional variation due to `hw` and this can be modelled by putting `hw` in the random part of the model. The further question of whether of not there are environmental time trends in either of the periods, which are still lengthy, might need consideration.
+-   To emphasise the point that a good genetic model requires a good environmental model: if `hw` is simply and *inadequately* entered into the model as a fixed linear regression with 1 d.f. then the estimate of $r_A$ is very biased and qualitatively misleading as it is close to zero!
+
+# **Fitting the model**
+
+Inverses and factors ...
+
+```{r}
+ainv <- ainverse(ped[,1:3])
+gen$id <- factor(gen$id)
+gen$sex <- factor(gen$sex)
+gen$jhw <- gen$hw
+gen$jhw <- factor(gen$jhw)
+```
+
+Fitting ...
+
+-   I expect such a model to require many interations so I have put `maxit= 30` to stop it giving up.
+
+-   Sometimes one needs more than the default work space and I have set it to 512Mb by `workspace= "512mb".`
+
+-   I have added `qgm_continue(asr,10)` to ensure parameters have converged fully as well as logL.
+
+```{r}
+asr <- asreml(fixed=cbind(bwt,eggs)~trait +at(trait,1):sex +trait:pol(dage,8) +trait:hw, random= ~corgh(trait):vm(id,ainv) +idh(trait):spl(hw) +corgh(trait):jhw, residual= ~id(units):corgh(trait), data= gen, maxit= 30, workspace= "512mb" )
+asr <- qgm_continue(asr,10)
+```
+
+```{r}
+qgm_summary(asr)
+```
+
+The checks show convergence of logL and parameters, and both the lists of the fixed parameters and the random parameters show the expected terms. Estimate the heritabilities ... I am including the random `hw` variance, some authors may do otherwise.
+
+```{r}
+vpredict(asr, hhb ~ V7/(V4+V7+V11))
+vpredict(asr, hhe ~ V8/(V5+V8+V12))
+```
+
+# Results and notes
+
+## Estimates of parameters
+
+So the outcomes for the objectives can be given:
+
+-   $r_A$ = -0.243 (s.e. 0.058)
+-   $r_E$ = -0.006 (s.e. 0.022), appears different from $r_A$
+-   $h^2_{bwt}$ = 0.284 (s.e. 0.019)
+-   $h^2_{eggs}$ = 0.300 (s.e. 0.026)
+
+## Observations
+
+I will not be testing the terms but some observations:
+
+-   For bodyweight at 35 days , the polynomials for dams age beyond order 4 appear unnecessary, and the egg number for the mature hens appears to be independent of the age of their dam.
+-   Do not test `spl(hw)` terms by LRT as it is not a true random effect. Since it is removing a nuisance time trend it is likely best left irrespective of the outcome. However the bound `B` for the `eggs` does suggest it can be removed, indicating no discernible environmental trend over hatch weeks although there is some variance associated with `hw`.
+
+## Spline fits to `hw`
+
+It is worth looking at the spline fits for `hw`. Unfortunately I have been unable to get `predict()` in `asreml()` to work with the multivariate model, possibly a space issue, so below I am displaying fits from univariate models. Each plot shows the predictions for `hw` (in blue or red) with +/- 2 s.e. shown in grey. I think they are quite impressive!
+
+### `bwt`
+
+![](bwt_hw_spline_fit.JPG)
+
+### `eggs`
+
+![](eggs_hw_spline_fit.JPG)
+
+# Discussion points
+
+## Normality and heterogeneity of residuals
+
+### Comments
+
+Do *not* test normality, if concerned, until after fitting the full model. There is *no* justification as the data residuals are assumed to be $MVN(0,V_e\mathbf{I})$ , **not** the data prior to analysis with its treatment effects and correlations arising from random effects! In addition remember:
+
+i.  Real data is never precisely Normal and tests for Normal distributions are very sensitive to any deviation;
+ii. REML is a set of variance estimating equations that are consistent i.e. will be asymptotically accurate;
+iii. The greatest reliance of REML on Normal is for significance tests, which are also asymptotically correct, i.e. as data becomes larger the tests become more appropriate;
+iv. A more serious problem for REML is heterogeneity of variance, e.g. in binomial data variances are much smaller in a group with low *p* compared to one with intermediate *p*;
+v.  Any transformation away from the usual scale of the trait will often demand transforming the parameters and results back to the usual scale and then interpreting them for the reader;
+vi. Occasionally, transformations can be useful, especially if the transformation is, say, log(x), which can be interpreted as a multiplicative model, or 1/x which with some data can be interpreted as a rate e.g. if x= time for an event to happen, then 1/x is a 'rate of happening'.[^1]
+vii. Alternatives if appropriate or feasible will be more challenging! 
+
+[^1]: For those interested, an excellent classic paper is Box and Cox ("An Analysis of Transformations." Journal of the Royal Statistical Society. Series B (Methodological), vol. 26, no. 2, 1964, pp. 211-252.)
+
+### A tool within `asreml()`
+
+`asreml()` has a useful command `plot()` for inspecting the residuals. See below. It has 4 plots covering both traits. *This may appear in assessments*. I have found it 'temperamental' to display in Rmarkdown, and the code below is further complicated for using `knitr()`. In straight R, `plot(asr)` is sufficient, and the resulting plot can be saved or cut and pasted into a document.
+
+-   A histogram for both traits. `bwt` is good.
+-   A useful Q-Q type plot of the residuals, where normal residual would fall on the line. Remember when looking at these plots there are more than 8000 points in each and many are superimposed over each other ind the black dense areas!
+    -   For `bwt` there is no great cause for concern with a small group of large positive residuals.
+    -   For `eggs` the graph is 'uncomfortable'. Given the form of the distribution a better fit to normality might be achieved by a power transformation (say) $y^{2.5}$, or perhaps $log (200- y)$. The use of 2.5 or 200 would need to be objectively assessed. See comments (v) and (vi) above.
+-   A plot of residuals against fitted values. Ideally there should be no discernible correlation. Correlations will generally appear with small data. The plot for `bwt` is good.
+-   A plot of residuals against the record number, which ideally should look like 'white noise'. It is useful to detect systematic heterogeneity of variance although how obvious this will be will depend on the order of the records. Neither trait shows serious heterogeneity.
+-   I have not found a way of changing point size to avoid uninformative ink-blot plots in ASReml's `plot()`; in R's standard `plot()` it can be avoided using the `pch=` parameter.
+
+```{r}
+diagnostics <- list()
+dias <- plot(asr)
+diagnostics[[1]] <- gridExtra::grid.arrange(dias$histogram, dias$fitted, dias$qq, dias$rowlabels, nrow=2) 
+```
+
+```{r}
+plot(diagnostics[[1]])
+```
+
+# Scaling
+
+A final note on scaling. One of the problems with the plots above is that the residual s.d. for `bwt` is larger than the residual s.d. for `eggs` which means that in the first two plots, the plot for `eggs` appears squeezed. For complex multivariate models, it is helpful to scale all traits prior to analysis so that the variances of the traits are approximately equal, ideally close 1. *This helps convergence and reduces rounding errors.*
+
+-   Remember variances go by squares, so if you divide a trait by 10, the variance is divided by 100.
+-   Remember to remove the scaling of means and (co)variances when the analysis is finished!
+
+# Learning outcomes
+
+The **primary purpose** of this tutorial is to look at some real data with real issues and, with the aid of data exploration, (i) discover the issues, and (ii) to look at how they might be addressed.
+
+-   Among the discussion points, examining Normal assumptions *is* part of the QGM course.
+-   Splines, orthogonal polynomials, and transformations are discussed for *awareness* of options for addressing issues that may be encountered e.g. in projects, but are not an examinable part of the QGM course.

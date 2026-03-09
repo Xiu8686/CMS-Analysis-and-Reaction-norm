@@ -1,0 +1,126 @@
+---
+title: "P Metabolism"
+author: "JAW"
+date: '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+# Set up
+
+```{r}
+library("asreml")
+```
+
+```{r}
+qgm_summary <- function(asr,wald) {
+  if(missing(wald)) {wald <- TRUE}
+  print("CONVERGENCE")
+  print(paste0(asr$converge," with logL = ",asr$loglik))
+  cat("\n")
+  print("VARIANCE COMPONENTS")
+  print(summary(asr)$varcomp)
+  cat("\n")
+  print("FIXED EFFECTS")
+  print(as.data.frame(summary(asr,coef=TRUE)$coef.fixed))
+  if(wald) {
+    cat("\n")
+    print("WALD TESTS")
+    print(as.data.frame(wald(asr,denDF="numeric",ssType="conditional")$Wald)[,c(1,2,4,6)])
+  }
+}
+```
+
+```{r}
+qgm_continue <- function(asr, iter, foll) {
+  if(missing(foll)) {foll = FALSE}
+  asreml.options(extra = iter, trace = foll)
+  asr <- update.asreml(asr)
+  asreml.options(extra = 0, trace = TRUE)
+  return(asr)
+}
+```
+
+# Data
+
+-   `y1` has no block variance
+-   `y2` is modified from `y1` with large block variance by
+    -   `y2`=`y1`-8 for block 1,
+    -   `y2`=`y1`+8 for block 2,
+    -   `y2`=`y1` for block 3
+
+```{r}
+hay <- data.frame(treatment= c(rep(rep(c(1,2),each=4),times=2),rep(3,times=8)), block= rep(c(1,2,3),each=8), y1= c(28,26,25,25,23,24,24,21,28,25,27,26,25,23,24,24,38,37,39,37,39,39,39,38), y2= c(20,18,17,17,15,16,16,13,36,33,35,34,33,31,32,32,38,37,39,37,39,39,39,38))
+hay
+nrow(hay)
+```
+
+# Design
+
+-   Confounding of treatment 3 with block 3
+-   Blocks 1 & 2, and treatments 1 & 2 balanced
+
+```{r}
+addmargins(table(hay$treatment,hay$block))
+```
+
+# Fixed `block` ... fails
+
+-   `asreml()` produces an answer but after identifying confounding
+    -   here `block 3` is set to precisely 0
+        -   s.e. is `NA`
+    -   `treatment 3` get a value, but only because the `block 3` set to 0
+        -   this is because `treatment` appears first in the model line
+        -   the only justification for this is to provide an answer, and leave the user to interpret the mess!
+-   behaviour is the same as `lm()`!
+
+## Using `asreml()`
+
+```{r}
+hay$treatment <- factor(hay$treatment)
+hay$block <- factor(hay$block)
+asr <- asreml(fixed= y1 ~1 +treatment +block, residual= ~units, data=hay)
+qgm_summary(asr)
+```
+
+## Using `lm()`
+
+-   same answers
+
+```{r}
+summary(lm(y1 ~1 +treatment +block, dat=hay))
+```
+
+# Random `block` with `y1`
+
+-   Small block variance
+    -   LRT is (P\>0.05)!
+-   `treatment 3` identified as significantly increasing `y1`
+    -   ... as observing such a large block effect is considered very unlikely
+
+```{r}
+asr <- asreml(fixed= y1 ~1 + treatment, residual= ~units, data=hay)
+asr <- asreml(fixed= y1 ~1 + treatment, random= ~block, residual= ~units, data=hay)
+asr <- qgm_continue(asr,5)
+qgm_summary(asr)
+```
+
+# Random `block` with `y2`
+
+-   Large block variance
+    -   LRT indicates clearly \>0
+    -   note how the notional 1 d.f. for estimating the block variance (between blocks 1 & 2) gives considerable uncertainty as to how large the variance actually is other than it is \>0!
+-   `y2` has same fixed effects and same residual variance
+    -   the data were constructed to be just that for demonstration purposes, and normally this is not so!
+-   ... now it is considered far less clear that`treatment 3` has an effect
+    -   as a large block effect cannot be considered unlikely
+
+```{r}
+asr <- asreml(fixed= y2 ~1 + treatment, residual= ~units, data=hay)
+asr <- asreml(fixed= y2 ~1 + treatment, random= ~block, residual= ~units, data=hay)
+asr <- qgm_continue(asr,5)
+qgm_summary(asr)
+```

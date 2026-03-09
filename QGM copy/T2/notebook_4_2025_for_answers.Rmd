@@ -1,0 +1,471 @@
+---
+title: "Tutorial 4: Multivariate (Multi-Trait) Analysis"
+author: "QGM team"
+date:  '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this tutorial we will fit multivariate models. These models are important as they use relationships between traits to enable prediction of one trait to be made from another trait. Sometimes there is rich information on one trait either because it is easily collected, or a phenotype has a high heritability (i.e. the phenotype is rich in genetic information), while others are hard to measure and low heritability making accuracy poor. The idea allows some different approaches to other problems, e.g. measures at different ages can be regarded as different traits, or a trait in males and a trait in females. In summary multivariate models are powerful tools in quantitative genetic models.
+
+Everything done in previous tutorials applies - PTAs, EBVs, Wald tests, Likelihood Ratio tests. There are two challenges with multivariate models.
+
+i.  The first challenge is the mental challenge to keep track of parameters as parameters increase as $n^2$ for $n$ traits. There are $0.5 n(n+1)$ parameters for just one random effect, $n$ trait variances and $0.5 n(n-1)$ covariances or correlations among traits; so parameter lists get longer and hypotheses tend to multiply.
+ii. The second challenge is the the extra syntax in the `asreml()` call.
+
+# Setting up
+
+Load the libraries and qgm functions needed - again there are no new helper functions.
+
+```{r results='hide'}
+library("asreml")
+source("qgm_helpers_t4.R")
+```
+
+Two further libraries are loaded to help explore the data.
+
+```{r}
+library("ggplot2")
+library("GGally")
+```
+
+# Reading data and pedigree
+
+## Records
+
+The data is changed somewhat from Tutorials 1 to 3. The traits here will be the body weight (`bwt`) of the Silver Carp at an important management point in the growth period (in g), the fillet weight (`fwt`) at the end of the growth (g), and the Minolta lightness (L\*) of the fillet colour (`minl` with no units). The generations have again been made overlapping.
+
+```{r}
+tut4 <- read.csv(file="rdat4.csv", header=TRUE, na.strings=c("NA"))
+head(tut4)
+tail(tut4)
+addmargins(table(tut4$gen,tut4$period))
+```
+
+### Repeated records?
+
+One question that should always be asked is whether there are repeated records in the data. If there are these will need to catered for in the model! This information can be easily obtained using `qgm_ped_summary()` with the first 3 columns.
+
+```{r}
+qgm_ped_summary(tut4[,1:3])
+```
+
+Every individual only has 1 record - which makes the model simpler! Again for simplicity we shall assume here that we know from previous analyses that these traits have no maternal effects although this does not add greatly to setting up the model, but output lists become longer!
+
+### Exploring data
+
+Good exploration of multiple traits requires getting some idea about how the traits relate to each other as well as an indication of their distribution. This can be quite tricky with lots of traits. A useful approach is a 'trellis plot'. This uses the `ggplot2` and `GGally` packages and you may wish to remember it in future. In QGM if required the basic code will be provided. It provides very crude shapes of distributions, simple pair-wise correlations and pair-wise scatter plots. This is very basic e.g. for example there are many generations of data all mixed up together!
+
+-   When plotting many points in a plot (e.g. in MSc projects!) beware uninformative 'blot plots' which simply show a big black blotch - they are rarely helpful. In R you can change point size and transparency (often using a parameter called 'alpha') to illuminate structure.
+-   The trellis plot does not show any problems that will require special attention.
+
+```{r warning= FALSE, message= FALSE, progress= FALSE}
+ggpairs(data = tut4[,c("bwt","fwt","minl")], diag= list(continuous= "bar", binwidth= 30), lower= list(continuous= wrap(ggally_points, size= 0.01, alpha= 0.1)))
+```
+
+## Pedigree
+
+The pedigree is the same as previously, but with a simple change that the `0` code for unknown, commonly used in pedigree files, has been replaced by `NA` for unknown. This makes no difference in R.
+
+```{r}
+ped <- read.csv(file= "rped4.csv", header= TRUE, na.strings=c("NA"))
+head(ped)
+tail(ped)
+```
+
+## Question 1
+
+-   Q1. Explore the data. This should include something about fixed effects that may need to be accounted for, and summaries of the genetic structure in a typical generation, giving some simple information indicating how useful the data may be to estimate genetic parameters.
+    -   Look back at previous tutorials for code snippets - I regularly do!
+-   $\mathbf{Answer.}$ Here are some relevant points:
+    -   Prospective fixed effects .
+        -   The data has representatives from 11 consecutive generations well balanced.
+        -   Each generation is represented in 2 of the 12 periods, removing the possibility of complete confounding of generations with time - periods also being approximately equal.
+        -   There are also balanced sexes, and approximately balanced tanks.
+        -   However genetic change is to be captured by a fitting a pedigree term, and period accounts for the time trend - so generation will not be fitted in the model. Otherwise sex, tank are fixed effects for the model.
+-   The `qgm_ped_summary()` with the data file also shows that individuals do not have repeated records, so there will be no opportunity to capture permanent environment - it will drop into the residual. The lack of repeated records (and/or other information) means that there are no information on age or stage of development (or whatever is relevant) for the record.
+-   The genetic structure appears (from a sample of generations) appears to be constant and well balanced. Each generation is produced from 10 sires, and 50 dams, with hierarchical mating, each sire mated to exactly 5 dams, and each dam to just the 1 sire. Full-sib family sizes were also equal in size. Therefore the 400 individuals in each generation had 50 full sib family each of 8 offspring, with sires having a total of 40 offspring. For a pedigree analysis this is quite good allowing good estimates of sire means, possibly dam means, with a good number of sires (especially over generations) to estimate variances. Since the analysis is intended for estimating genetic correlations, there is a need to have strong genetic signals for a good sample of individuals - it is hard to estimate genetic correlations on a small sample of weak estimates of breeding values. Remember genetic correlations are correlations of breeding values - so first find your breeding values!
+-   In a bivariate analysis it is relevant how much information is on each trait. Each individual has both traits, with no missing values, so there will be environmental correlations as well as genetic correlations.
+
+```{r}
+addmargins(table(tut4$sex, tut4$tank))
+addmargins(table(tut4$sex, tut4$gen))
+addmargins(table(tut4$tank, tut4$gen))
+addmargins(table(tut4$sex, tut4$period))
+addmargins(table(tut4$tank, tut4$period))
+```
+
+```{r}
+qgm_ped_summary(tut4[tut4$gen %in% c(0),]) # base generation
+qgm_ped_summary(tut4[tut4$gen %in% c(1),]) # some interesting generations
+qgm_ped_summary(tut4[tut4$gen %in% c(6),])
+qgm_ped_summary(tut4[tut4$gen %in% c(7),])
+qgm_ped_summary(tut4[tut4$gen %in% c(10),])
+```
+
+```{r}
+addmargins(table(is.na(tut4$bwt),is.na(tut4$fwt)))
+```
+
+# Declaring factors
+
+We will need to set up the following as factors: `sex`, `tank` and `period` are fixed, `id` will be random.
+
+```{r}
+tut4$sex <- factor(tut4$sex)
+tut4$tank <- factor(tut4$tank)
+tut4$period <- factor(tut4$period)
+tut4$id <- factor(tut4$id) 
+```
+
+# Obtaining A-inverse
+
+Easy!
+
+```{r}
+ainv <- ainverse(ped[,1:3]) 
+```
+
+# Fitting a multi-trait (multivariate) model
+
+## Defining the model
+
+The same basic format of setting up the model is retained: `fixed=`, `random=`, and `residual=`, but we need to develop the way we present the model. See the code chunk below. For simplicity we are only running a bivariate model.
+
+-   the `fixed=` term
+    -   y-variates: to show the multiple traits we simply list them with `cbind()`, which in R binds columns together;
+    -   mean: we now have a mean for each trait, so rather than `1` we put `trait`;
+    -   factors: we now have fixed effects for each trait, so e.g. rather than `sex` we put `trait:sex`;
+        -   note the ':' not '.', which some packages use;
+-   the `random=` term
+    -   each term is of the form 'something about the traits':'variance model for the factor', where the variance model for the factor is familiar from previous tutorials;
+    -   the 'something about the traits' is another variance model describing the (co)variances among the traits for that factor, and in the code chunk below it is given by `us()`;
+        -   the `us()` is for an unstructured and model, where with $n$ traits one simply fits a general $n$x$n$ (co)variance matrix;
+-   the `residual=` term ... sadly, for reasons unknown to me ... there are annoying little changes!
+    -   firstly 'something about the traits' comes after 'variance model for units', NOT before(!);
+    -   secondly the 'identity matrix' covariance matrix is now 'id(units)' not 'idv(units)' (which is messy!).
+
+```{r}
+tut4.asr <- asreml(fixed=cbind(bwt,fwt)~trait+trait:sex+trait:tank+trait:period,random=~us(trait):vm(id,ainv),residual=~id(units):us(trait),data=tut4)
+```
+
+## Looking at multi-trait output
+
+Still use `qgm_summary()`.
+
+```{r}
+qgm_summary(tut4.asr)
+```
+
+-   Sensible fit? Convergence looks good, all terms have 'P', and '%ch' are all zero. If the components were still showing small changes or iterations looked to be converging but not quite there then there is a function `qgm_continue()` to update the analysis with a few more iterations. Note its usage.
+
+```{r}
+tut4.asr <- qgm_continue(tut4.asr,5)
+qgm_summary(tut4.asr)
+```
+
+Look at the outputs again. We will deal with the fit and fixed effects first as these are more familiar.
+
+-   Sensible fit? No change in needing to look at convergence `bound` and `%ch`. Looks good! All values 'P' and no 'B' so it is indicating all our parameters are away from boundaries and unconstrained.
+-   Fixed effects. This data frame has 38 entries and should be familiar.
+    -   2 trait means ... see last 2 entries at end of data frame, 2 estimates for 2 d.f.!
+    -   24 period means, 12 for each of 2 traits, with generation 0 set to 0 as the identifiability constraint for each trait, and 22 estimates (11 for each trait), corresponding to 22 d.f.;
+    -   8 tank means, 4 for each of 2 traits, with `tank_1` set to 0 as the identifiability constraint for each trait, and 6 estimates (3 for each trait), corresponding to 6 d.f.;
+    -   4 sex means, 2 for each of 2 traits, with `sex_1` set to 0 as the identifiability constraint for each trait, and 2 estimates (1 for each trait), corresponding to 2 d.f.
+-   Wald tests. This data frame has 3 entries, one for each term in '`fixed=`.\
+-   Variance components. 6 terms plus the `units:trait!R` which we ignore. Note `asreml()` numbers these from top to bottom V1, V2, ..., V7 with V4 being `units:trait!R`.
+    -   the first 3 terms are the (co)variances between the traits, since this is associated with the `vm(id,ainv)` term, which in univariate models gives $V_a$, so these (co)variances in our multi-trait model are the estimates of additive genetic (co)variances among the traits; look at these ...
+        -   `bwt:bwt` (V1) is the estimate of $V_a$ for `bwt`;
+        -   `fwt:bwt` (V2) is the estimate of the additive genetic covariance of `bwt` with `fwt`;
+        -   `fwt:fwt` (V3) is the estimate of $V_a$ for `fwt`.
+    -   the residual (co)variances for $V_e$ are identified by `units` and appear below `units:trait!R`.
+    -   there are 3 terms for the (co)variance matrix, identified similarly to that described above for $V_a$.
+
+### Questions 2 to 6
+
+-   Q2. Is there any evidence of environmental trends?
+-   $\mathbf{Answer.}$ The evidence for environmental trends will come from the period effects for each trait. The Wald test given in the table are for a test of a null H0: 'all period effects are equal' with the alternative H1: 'not H0'. The table shows 'Pr' = 0.51, which says that the potential for Type 1 error is too large for rejecting H0 and so there is no evidence to reject H0.
+    -   However this is a very blunt test of environmental trends (e.g. is there a linear trend? it is tempting to imagine such a trend looking at the estimates), although it does protect the estimates of genetic effects from biases introduced by an inadequate reduced model of the trend which is a nuisance factor.
+    -   The models for environmental trends will be expanded upon in Tutorial 5. One simple change is to introduce two terms - one for each trait: this can be achieved by replacing `. + trait:period .` by `. + at(trait,1):period + at(trait,2):period .` which splits the 22 d.f. into 11 for each trait giving a separate Wald test for each trait. Try it!
+-   Q3. Why are there only 3 estimates for `vm(id,ainv)` to fill the 2x2 matrix for genetic (co)variances $V_a$ and residual (co)variances $V_e$?
+-   $\mathbf{Answer.}$ Because the matrix is symmetric: corr(bwt,fwt) = corr(fwt,bwt), so the estimate is already listed.
+-   Q4. How many estimates for `us(trait):vm(id,ainv)` would there be with 3 variates, or 4 variates? What about n variates?
+-   $\mathbf{Answer.}$ It was given in the text of the Rmd file: $0.5 n(n+1)$. So $n$= 3 is 6 values, $n$= 4 is 10, $n$= 5 is 15. This means the problem gets a lot harder to solve as the traits increase.
+-   Q5. Write down the estimated (co)variance matrix for the breeding values of the 2 traits `bwt`, `fwt`.
+-   $\mathbf{Answer.}$ The point of this question is simply to point out that this is what the estimates are! i.e. (189, 45 \| 45, 207) taken from the vcomponents.
+-   Q6. Calculate by hand, i.e. with a calculator of some sort, the heritability of trait 2 and its genetic correlation with trait 1, and the residual correlation of trait 2 with trait 1.
+-   $\mathbf{Answer.}$ The heritability is the ratio of the genetic to the phenotypic variance, and for trait 2 is $207/(207+637)=0.245$. A correlation is the covariance divided by the square root of the product of the variances . so for the genetic correlation is $45/\sqrt{189.207}=0.228$, the environmental correlation is $163/\sqrt{437.637}=0.309$.
+
+```{r}
+at.asr <- asreml(fixed=cbind(bwt,fwt)~trait+trait:sex+trait:tank+at(trait,1):period+at(trait,2):period,random=~us(trait):vm(id,ainv),residual=~id(units):us(trait),data=tut4)
+qgm_summary(at.asr)
+```
+
+# Functions of variance components
+
+With multi-trait evaluations the number of parameters of interest that are functions of those estimated directly increases dramatically! They are calculated using the same `vpredict()` function. Doing it all by hand would be a chore, plus the need for s.e.s!
+
+Look at the functions for estimating phenotypic parameters! Copy and paste can help providing you make all the changes needed!
+
+```{r results='hold'}
+vpredict(tut4.asr, vp11 ~ (V1+V5) ) # var(1)
+vpredict(tut4.asr, vp12 ~ (V2+V6) ) # cov(1,2)
+vpredict(tut4.asr, vp22 ~ (V3+V7)) # var(2)
+vpredict(tut4.asr, rp12 ~ (V2+V6)/sqrt((V1+V5)*(V3+V7))) # cor(1,2)
+```
+
+The phenotypic correlations are NOT the same as the simple ones obtained without properly accounting for the fixed effects and the genetic effects. The simple one are sometimes OK for a first description but cannot be regarded as safe in genetic models!
+
+```{r}
+cor(tut4[,c("bwt","fwt")])
+```
+
+## Questions 7 to 10
+
+-   Q7. Use `vpredict()` to estimate the heritabilites for both traits.
+-   $\mathbf{Answer.}$ $h^2_{bwt}$ = 0.317 s.e. 0.030, $h^2_{fwt}$ = 0.246 s.e. 0.032. Remember s.e.s!
+-   Q8. Use `vpredict()` to estimate the genetic correlations and residual correlations for the traits.
+-   $\mathbf{Answer.}$ $r_A$ = 0.226 s.e.0.085, $r_E$ = 0.320 s.e.0.085, $r_P$ = 0.293 s.e.0.017. Remember s.e.s!
+-   Q9. Look at the s.e.s. for the phenotypic, genetic and residual correlations. Which are more precisely estimated and consider why?
+-   $\mathbf{Answer.}$ The phenotypic is much better estimated, than the environmental and genetic. To obtain the environmental and the genetic correlations, it is necessary to partition the phenotypic variance between the genetic and environmental variances and this partition is complex and will introduce estimation errors into both. The estimates tend to be negatively correlated as there is already a reasonable estimate of the phenotypic variance directly from the variance of the data itself - even though REML may refine and modify this estimate - and so overestimating a genetic variance will tend to result in underestimating the environmental variance, and these errors will tend to cancel and reduce the scale of estimation errors for the phenotypic correlation.
+-   Q10. Selection for positive values was made on trait `bwt`, describe the genetic and phenotypic trends that are expected from the parameters obtained for both `bwt` and `fwt`.
+-   $\mathbf{Answer.}$ Both have moderate heritabilities and would not be difficult to change, and selection for +ve `bwt` should result in a +ve gain in `bwt`. Given the +ve genetic correlation one would expect that both traits would change in the same direction but `fwt` at a lower rate- as measured by genetic s.d.s. This expectation may not be realised if the correlation is not particularly large in magnitude and populations relatively small, due to genetic drift and prediction errors.
+
+```{r}
+vpredict(tut4.asr, b_hh ~ V1/(V1+V5)) # Q7
+vpredict(tut4.asr, f_hh ~ V3/(V3+V7)) # Q7
+vpredict(tut4.asr, rg ~ V2/sqrt(V1*V3)) # Q8
+vpredict(tut4.asr, re ~ V6/sqrt(V5*V7)) # Q8
+vpredict(tut4.asr, rp ~ (V2+V6)/sqrt((V1+V5)*(V3+V7))) # Q8
+```
+
+# Genetic trends
+
+The numerator relationship matrix $\mathbf{A}$ will allow us to track the impact of selection on the different traits PROVIDING all the information is included in the model. For example, a univariate analysis of `fwt` (which is not part of the selection index but does appear to be genetically correlated with it) will be open to bias in the estimate of $V_a$ and heritability, because the information on the selection is missing. In this multi-trait analysis including `bwt`, which was the sole trait of selection, there is no problem! One reason why multi-trait analyses are important.
+
+## Extracting EBVs
+
+We can get the EBVs using `qtl_random_effects()`. This works by finding the right character string in the set of solutions within `tut4.asr`. It is worth checking that these are what we need. Extract the EBVs for traits `bwt` and `fwt`.
+
+```{r}
+b_ebv <- qgm_random_effects(tut4.asr,"bwt")
+head(b_ebv)
+tail(b_ebv)
+f_ebv <- qgm_random_effects(tut4.asr,"fwt")
+head(f_ebv)
+```
+
+## Merging
+
+Now we need to merge these together, and combine it with other information contained in `ped`. The EBVs can be merged using the level, then we can tidy up the column names and merge with `ped`. I am also going to delete the z-ratios, reorder the columns for presentation.
+
+```{r}
+ebv <- merge(b_ebv,f_ebv,by="level")
+head(ebv)
+colnames(ebv) <- c("id","b_ebv","b_se","z1","f_ebv","f_se","z2")
+head(ebv)
+ped <- merge(ped,ebv,by="id") 
+head(ped)
+ped <- ped[c(1:7,9:10)]
+head(ped)
+```
+
+## Plotting
+
+Plot the EBVs against generation to look at the genetic trends over generations.
+
+```{r}
+plot(ped$gen,ped$b_ebv, col="blue", cex =0.1)
+points(ped$gen+0.05,ped$f_ebv,col="red", cex=0.1)
+```
+
+Regress the EBVs against generation to estimate gains per generation. I am assuming a simple linear trend here. `bwt` shows strong gain in response to selection upon it, `fwt` shows weak positive gain. These predicted gains are in line with the signs of the genetic correlations (not surprisingly).
+
+```{r, results='hold'}
+summary(lm(ped$b_ebv~1+ped$gen))
+summary(lm(ped$f_ebv~1+ped$gen))
+```
+
+Replot ...
+
+```{r}
+plot(ped$gen,ped$b_ebv, col="blue", cex =0.1)
+points(ped$gen+0.1,ped$f_ebv,col="red", cex=0.1)
+lines(ped$gen, 3.95+11.11*ped$gen, col="blue")
+lines(ped$gen, 3.67+ 1.63*ped$gen, col="red")
+```
+
+## A note on the correlations among EBVs
+
+Note that correlations among EBVs are NOT estimates of the genetic correlations unless the accuracy of all the EBVs are really close to 1! If the accuracies are poor, they are often very different from the true genetic correlations and should always be treated as such!
+
+```{r}
+cor(ped[,c("b_ebv","f_ebv")])
+```
+
+It is very different from the correct estimate! This is because the EBV correlations depend on the information used to estimate the EBVs, do not properly account for the sampling correlations, and individuals will have different amounts of information.
+
+# Testing hypotheses on genetic correlations
+
+It is unusual to carry out a formal LRT with a null hypothesis that $V_a$ = 0 for a trait within a multi-trait analysis, although it can be done. For one reason, if it is difficult to detect genetic variance in a trait, then it is doubly difficult to detect if this variation is associated with genetic variation in another trait, which may also be estimated with uncertainty. Typically, particularly with pedigree, you need an order of magnitude more data to get a reliable genetic correlation than you do to get a reliable heritability. Therefore the existence of the genetic variance in the traits is often already established.
+
+The typical hypotheses arising from multi-trait analysis are concerned with whether or not there is evidence that the genetic correlations are 0, i.e. whether the traits can be regarded as genetically independent. The hypotheses being tested are a Null H0: $r_A$ = 0 against an Alternative H1: $r_A$ \< or \> 0 i.e. not equal to 0. This test is done by LRT, but note that H0 is not on a boundary as the bounds of $r_A$ are -1 and 1. Therefore we can follow steps (1) to (4) as in Tutorial 3 but step (5) is now simply determined by standard comparisons to chi-squared tables e.g. for Type 1 error of 0.05 (i.e. P\<0.05) compare to the 95% point of chi-squared with 1 d.f. (`qchisq(0.95,1)` = 3.841).
+
+-   Step (1) is the full model fitted above - it had a log likelihood, logL1 = -32570.73
+-   Step (2) is fitting the reduced model.
+    -   The hypotheses being tested are equivalent to H0: genetic covariance $V_a$[1,2] = 0 against the alternative H1: genetic covariance $V_a$[1,2] \< or \> 0.
+    -   This can be simply achieved by changing the variance model for the traits from `us(trait):vm(id,ainv)` to `idh(trait):vm(id,ainv)` which models the genetic (co)variances as a diagonal matrix, so all (co)variances are 0.
+    -   So the following code carries out Step (2) with logL0 = -32574.31.
+
+```{r}
+tut4.red <- asreml(fixed=cbind(bwt,fwt)~trait+trait:sex+trait:tank+trait:period,random=~idh(trait):vm(id,ainv),residual=~id(units):us(trait),data=tut4)
+qgm_summary(tut4.red)
+```
+
+-   Step (3) calculates the test statistic of 2x(32574.31-32570.73) = 7.16.
+-   Steps (4) and (5) are comparing to chi-squared with 1 d.f. Below the critical values show that is the Type 1 error was 0.05 or 0.01 then there is sufficient evidence to reject H0 for a non-zero genetic correlation, but not if the Type 1 error was set to 0.001.
+
+```{r}
+qchisq(0.95,1)
+qchisq(0.99,1)
+qchisq(0.999,1)
+```
+
+## Question 11
+
+-   Q11. Test the Null hypothesis H0: $r_E$ = 0 with an Alternative H1: $r_E$ \< or \> 0 with Type 1 error = 0.05.
+-   $\mathbf{Answer.}$ The test statistic is twice the drop in log-likelihood by fixing the correlation to 0 as stated in H0. The correlation can be set to zero by replacing the `us(trait)` in the residual with `idh(trait)`. This estimates parameters assuming the trait's genetic (co)variance matrix to be (v11 0 \| 0 v22) instead of (v11 v \| v v22). The value of the test statistic is 164.39. The critical value is `qchisq(0.95,1)` = 3.841 - note this component is not on a boundary as it can be negative or positive! So H0 can be rejected in favour of H1, with P\<0.001.
+
+```{r}
+tut4.red <- asreml(fixed=cbind(bwt,fwt)~trait+trait:sex+trait:tank+trait:period,random=~us(trait):vm(id,ainv),residual=~id(units):idh(trait),data=tut4)
+qgm_summary(tut4.red)
+```
+
+The test statistic is 2x(32652.9239-32570.7309) = 164.39
+
+# Accuracies
+
+Accuracy is directly related to genetic gain! See the additional pdf on 'The Breeders Equation'! As covered in the lectures we can obtain estimates of accuracy by looking at the s.e. for each EBV and calculating $\sqrt{1 - (s.e.)^2/[(1+F)V_a]}$ where F is the inbreeding coefficient. These accuracies are useful and widely used but assume $\textit{(i) the model is correct and (ii) the estimated parameters are correct}$!
+
+-   F is one of the 'attributes' of the `ainv` created above, and can be obtained by `ped$f <- attr(ainv,"inbreeding")`.
+-   The leading diagonal of $\mathbf{A}$ tells us the genetic variance of the EBV for individual i relative to the base is $(1+F_i)V_a$.
+-   The $(s.e.)^2$ squared is that part of this genetic variance unexplained by our model, called the Prediction Error Variance, so the amount explained is $(1+F_i)V_a - (s.e.)^2$
+-   The fraction of variance explained i.e. $1- (s.e.)^2/[(1+F_i)V_a]$ is the squared correlation
+-   So the accuracy for individual i, which is the correlation, is $\sqrt{1 - (s.e.)^2/[(1+F)V_a]}$
+
+The estimates of $V_a$ for each trait are taken from the bi-variate analysis.
+
+```{r}
+ped$f <- attr(ainv,"inbreeding")
+bva <- 189.06
+fva <- 207.36
+ped$b_acc <- sqrt(1. - ped$b_se**2./(bva*(1+ped$f)))
+ped$f_acc <- sqrt(1. - ped$f_se**2./(fva*(1+ped$f)))
+head(ped[,c("b_acc","f_acc")])
+tail(ped[,c("b_acc","f_acc")])
+```
+
+Accuracies will differ among individuals according to the information available. A mean accuracy for generation 0 for `bwt` can be obtained by the following code.
+
+```{r}
+mean(ped[ped$gen %in% c(0),"b_acc"])
+```
+
+## Questions 12 to 15
+
+-   Q12. In generation 0, why are the accuracies of individuals 1, 2, and 6 different?
+-   $\mathbf{Answer.}$ Information! Generation 0 will have some individuals with recorded offspring, some with more than others, and some unselected with no offspring only their own phenotype: 1 is a sire, 6 is a dam, 2 is unselected.
+-   Q13. What is the information available for individual 2 upon which the EBV is based?
+-   $\mathbf{Answer.}$ As it is the base generation it is just its own phenotypes. In this multi-trait example, the traits not completely independent so information on one trait can help to predict the breeding value of another.\
+-   Q14. In general, what is the accuracy of an individual for which the only information available is a phenotype of heritability $h^2$? Compare this to your answer to Q12.
+-   $\mathbf{Answer.}$ The answer is $h$. Since $h_2$ = 0.317 or 0.246, suggesting accuracies of 0.563 and 0.496. See the breeders equation pdf. Comparing the answers to Q12, in this example the second trait does not add very much information but this is not always the case! There is also some small rounding errors evident c.f. individuals 3, 4 and 5.
+-   Q15. How do the mean accuracies vary over generations?
+-   $\mathbf{Answer.}$ They increase over generations - there is a gradual increase in information on individuals in this constant structure. The change is faster at the beginning when the Bulmer effect - linkage disequilibrium arising from selection - arrives at a steady state. It will never be completely constant as inbreeding will change the genetic variance and heritability over time.
+
+```{r}
+acc <- data.frame(gen=numeric(11), b_acc=numeric(11), f_acc=numeric(11))
+for (i in c(1:11)) {
+   acc[i,1] <- i-1
+   acc[i,2] <- mean(ped[ped$gen %in% c(i-1),"b_acc"])
+   acc[i,3] <- mean(ped[ped$gen %in% c(i-1),"f_acc"])
+}
+acc
+```
+
+# Finally ...
+
+1.  This data was created by simulation, so the true model is known:
+    -   there is no environmental trend over generations for any trait;
+    -   $h^2$ = 0.3 for all traits;
+    -   for `bwt` and `fwt` $r_A$ = $r_E$ = 0.3, `minl` was independent of both;
+    -   selection was only on `bwt` carried out using simple mass selection;
+    -   in the analysis of the data the estimate of $r_A$ between `bwt` and `fwt` was at the low end of what may be expected by chance;
+    -   fitting the environmental trend (`period` in our model) is important (and essential in real data) and why laboratory experiments, particularly those with discrete generations, benefit from control lines as environmental trends are more easily discerned;
+    -   although VERY important in all branches of quantitative genetics the challenge of estimating genetic correlations from pedigrees in real data should not be underestimated!
+2.  An alternative to using `us(trait)` is `corgh(trait)`.
+3.  In the above we have fitted the same model to all the traits in the analysis. However `asreml()` can fit different terms to each trait using the `at()` function. While this is quite simple to implement it is beyond the scope of QGM.
+
+## Questions 16 to 20
+
+-   Q16. Use `corgh(trait)` instead of `us(trait)` in the full bi-variate model that was fitted above. What does it do?
+-   $\mathbf{Answer.}$ It fits the same model as `us(trait)` but parameterises it differently. So instead of estimating covariances, it estimates the correlations. This can be useful, sometimes because the correlations are calculated directly, sometimes the different parameterisation can help convergence in fitting very complex models.
+-   Q17. How might one confirm that `corgh(trait)` is equivalent to using `us(trait)` when fitting the model?
+-   $\mathbf{Answer.}$ First check is the log-likelihood, since the models are equivalent then at convergence the likelihoods will be the same, and one should expect the variances to be the same. Since the fitting process uses a different set of parameters the sequence of log-likelihoods during convergenece will differ, and this may also lead to differences in estimates due to rounding errors, but these should be very small!
+
+```{r}
+# Q16
+tut4.asr <- asreml(fixed=cbind(bwt,fwt)~trait+trait:sex+trait:tank+trait:period,random=~corgh(trait):vm(id,ainv),residual=~id(units):corgh(trait),data=tut4)
+tut4.asr <- qgm_continue(tut4.asr,5,TRUE)
+qgm_summary(tut4.asr)
+```
+
+-   Q18. Add a maternal effect to the full model using `idh(trait):dam`. What do you conclude?
+-   $\mathbf{Answer.}$ Maternal effects are very small in this data as the log-likelihood does not change! There is no evidence $V_d$ \> 0. Note that typically one would initially add the term as `us(trait):dam`, or equivalently `corgh(trait):dam` to include the covariance, but here one trait has a bound maternal variance and is `NA`, which causes a problem when trying to fit the covariance! So the question offered the simpler model estimating only the two variances.
+
+```{r}
+# Q18
+tut4.asr <- asreml(fixed= cbind(bwt,fwt)~trait+trait:sex+trait:tank+trait:period, random= ~corgh(trait):vm(id,ainv) + idh(trait):dam, residual= ~id(units):corgh(trait), data=tut4)
+tut4.asr <- qgm_continue(tut4.asr,5,TRUE)
+qgm_summary(tut4.asr)
+```
+
+-   Q19. Run a bivariate model (ignoring maternal effects) for `bwt` and `minl`. What are the estimates of the genetic and residual correlations?
+-   $\mathbf{Answer.}$ Using `corgh()` these can be obtained directly: $r_A$ = 0.011 with s.e. 0.085, and $r_E$ = -0.001 with s.e. 0.025.
+
+```{r}
+# Q19
+tut4.asr <- asreml(fixed= cbind(bwt,minl) ~trait+trait:sex+trait:tank+trait:period, random= ~corgh(trait):vm(id,ainv), residual= ~id(units):corgh(trait), data= tut4)
+tut4.asr <- qgm_continue(tut4.asr,5,TRUE)
+qgm_summary(tut4.asr)
+```
+
+-   Q20. [Optional] For experience, run the tri-variate model for `bwt`, `fwt` and `minl`.
+-   $\mathbf{Answer.}$ See below. The change in the command to get the trivariate is only in `cbind(bwt,fwt,minl)` but the number of parameters estimated increase greatly!
+
+```{r}
+# Q20
+tut4.asr <- asreml(fixed= cbind(bwt,fwt,minl) ~trait+trait:sex+trait:tank+trait:period, random= ~corgh(trait):vm(id,ainv), residual= ~id(units):corgh(trait), data= tut4)
+tut4.asr <- qgm_continue(tut4.asr,5,TRUE)
+qgm_summary(tut4.asr)
+```
+
+# Outcomes
+
+We have covered:
+
+-   how to set up a multi-trait model in `asreml()`
+-   how to look at its output
+-   how to examine genetic trends
+-   how to test a Null Hypothesis H0: $r_A$ = 0 against and Alternative H1: not H0
+-   how to calculate accuracies
+-   some different options for modelling (co)variances between traits in `asreml()`

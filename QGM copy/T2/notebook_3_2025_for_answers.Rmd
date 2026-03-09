@@ -1,0 +1,364 @@
+---
+title: "Tutorial 3: Repeatability Models & Likelihood Ratio Tests"
+author: "QGM team"
+date:  '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this tutorial we will fit models that include additional sources of variance and carry out hypothesis testing on the random effects. The trait to be analysed will retain the pedigree structure of Tutorials 1 & 2. As before, we will be using Restricted Maximum Likelihood and we will address testing hypotheses for random effects, e.g testing a null hypothesis that a variance component is 0 against an alternative that it is \>0 ... it can't be negative!
+
+# Setting up
+
+Load the libraries and the QGM helper functions. The QGM helper functions are just the same as Tutorials 1 and 2.
+
+```{r results='hide'}
+library("asreml")
+source("qgm_helpers_t3.R")
+```
+
+# Read in data
+
+## Phenotypic data
+
+The records have changed somewhat from Tutorials 1 and 2! There are now an additional tow columns `tut3$age`, and `tut3$period`. In this data there are multiple records per individual taken at different ages, which is why there is `tut3$age`, and multiple generations with records. It is timely to remember that since P = G + E, any model to uncover genetic effects is only as good as its environmental model, however sophisticated the genetic model is.
+
+When records cover long periods of time, such as generations, there is some degree of confounding between genetic time trends (be they drift or selection response) and the environmental time trend. Models such as Individual (Animal) Models do help to disentangle these - in the absence of environmental time trends there is no need to fit generations in the model, the pedigree does all the work! Tracking the environmental time trend is one reason why selection experiments have control lines where no selection takes place and the potential genetic drift is minimised (e.g. using cryo-conserved gametes) - control lines are always a good idea! To help disentangle these in our simulated data there are overlapping generations which removes some of the confounding of genetic and environmental time trends and measurements are taken in `tut3$period` to establish the environmental time trend.
+
+```{r}
+tut3 <- read.csv(file="rdat3.csv",header=TRUE,na.strings=c("NA"))
+head(tut3)
+tail(tut3)
+```
+
+The overlapping nature of the generations is shown below with generations in the rows.
+
+```{r}
+table(tut3$generation,tut3$period)
+```
+
+### Questions 1 to 5
+
+-   Q1. How many records are there?
+-   $\mathbf{Answer.}$ This can be obtained from `nrow(tut3)` but also from 1600 distinct ids with exactly 2 records seen in `qgm_ped_summary(tut3)`.
+-   Q2. How many individuals contribute records?
+-   $\mathbf{Answer.}$ From `qgm_ped_summary(tut3)`, 1600
+-   Q3. How many dams have offspring contributing records?
+-   $\mathbf{Answer.}$ From `qgm_ped_summary(tut3)`, 200
+-   Q4. What is the maximum number of records per individual?
+-   $\mathbf{Answer.}$ From `qgm_ped_summary(tut3)`, max=2.
+-   Q5. Do all recorded individuals have the same number of records?
+-   $\mathbf{Answer.}$ From `qgm_ped_summary(tut3)`, exactly 2, as min = max.
+
+```{r}
+qgm_ped_summary(tut3)
+```
+
+## Pedigree data
+
+```{r}
+ped <- read.csv(file= "rped1.csv", header= TRUE, na.strings=c("NA"))
+head(ped)
+tail(ped)
+```
+
+# Preparing for the analysis
+
+## Background to the model
+
+In this data we will want to estimate the additive genetic variance ($V_a$) using the pedigree, however as mentioned above, the quality of the genetic outcomes will only be as good as the environmental model. There are two sources of environmental variance that should be considered over and above concerns over environmental time trends.
+
+-   There are repeated observations per individual and so we must be alert to the possibility of a permanent environment variance ($V_i$) causing covariance among the repeated records.
+-   In addition it is often the case that distinct individuals will have covariances due to shared environments e.g. different farms, or hospitals, or blocks in plant trials. In this data there are full-sib families and full-sibs often share variance, sometimes for genetic reasons e.g. dominance variance, but also maternal environments. In this data this common environment will be explored by estimating a maternal variance ($V_d$).
+-   Therefore there are FOUR independent sets of random effects:
+    i)  $V_a$, the additve genetic;
+    ii) $V_i$, the permanent environment;
+    iii) $V_d$ the maternal environment; and
+    iv) $V_e$, the residual.
+-   Note the power of what is being done: we are saying that records differ because of:
+    -   their genetics, which has a a covariance pattern described by $V_a \mathbf{A}$ across all the PEDIGREE;
+    -   their unique life histories, which has a covariance pattern described by $V_i \mathbf{I}$ across all the INDIVIDUALS WITH RECORDS;
+    -   their shared life histories, which has a covariance pattern of $V_m \mathbf{I}$ across all DAMS OF INDIVIDUALS WITH RECORDS; we could look for additive genetic variance in maternal effects i.e. some dams are better because of the genes they carry - but we must beware over fitting to our limited data!
+    -   a random deviation every time a record is taken, which has a covariance pattern of $V_e \mathbf{I}$ across all RECORDS.
+
+## Some R for simplicity
+
+So TWO distinct variance components, $V_a$ and $V_i$, are associated with `id`. We can fit this in our model in different ways but here we will do something simple and create a copy of `id` in our data frame, which we call `idi` (my choice) and so one variance can be associated with `id` and one with `idi`.
+
+```{r}
+tut3$idi <- tut3$id
+head(tut3)
+```
+
+## Setting up factors
+
+We need to set up factors:
+
+-   for fixed effects ...
+
+    i)  `sex`, with 1 d.f.
+    ii) `tank`, with 3 d.f. and
+    iii) `period`, with 4 d.f.
+    iv) `age`, with 1 d.f., as the repeated records on the individual are taken at set ages which may differ systematically!
+
+-   for random effects ...
+
+    v)  `id`, the list of identities in the pedigree for estimating $V_a$;
+
+    <!-- -->
+
+    vi) `idi`, our copy of individuals for estimating $V_i$;
+    vii) `dam`, for estimating $V_d$.
+
+```{r}
+tut3$sex <- factor(tut3$sex)
+tut3$tank <- factor(tut3$tank)
+tut3$period <- factor(tut3$period)
+tut3$age <- factor(tut3$age)
+tut3$id <- factor(tut3$id) 
+tut3$idi <- factor(tut3$idi)
+tut3$dam <- factor(tut3$dam)
+```
+
+## Calculating A-inverse
+
+Easy!
+
+```{r}
+ainv <- ainverse(ped[,1:3]) 
+```
+
+# Fitting the Full Model and its output summary
+
+Now we are ready to fit the full model in ASReml and estimate the variance components using `asreml()`. The `residual=` option in `asreml()` is unchanged, and the `fixed=` option is easily extended by the addition of `+age+period`. The `random=` option needs more explanation, with the three terms:
+
+-   `vm(id,ainv)` for component $V_a$ to give (co)variance structure $\mathbf{A}$ for `id`
+-   `idv(idi)` for component $V_i$ to give (co)variance structure $\mathbf{I}$ for `idi`; and
+-   `idv(dam)` for component $V_d$ to give covariance structure $\mathbf{I}$ for `dam`.
+
+```{r}
+tut3.asr <- asreml(fixed= weight ~1+sex+tank+age+period, random= ~vm(id,ainv)+idv(idi)+idv(dam), residual= ~idv(units), data=tut3)
+qgm_summary(tut3.asr)
+```
+
+## Questions 6 to 8
+
+-   Q6. Write out the model formula.
+
+-   $\mathbf{Answer.}$ The model formula is $\mathbf{y}=\mathbf{1}m+\mathbf{X}\mathbf{b}+{{\mathbf{Z}}_{1}}\mathbf{u}+{{\mathbf{Z}}_{2}}\mathbf{v}+{{\mathbf{Z}}_{3}}\mathbf{d}+\mathbf{e}$ where:\
+    $\mathbf{y}$ is a 3200 x 1 vector of phenotypes for weight;\
+    m is a scalar fitted mean;\
+    $\mathbf{1}$ is a 3200 x 1 vector of ones, the design matrix for the mean;\
+    $\mathbf{b}$ is a vector of fixed effects with 9 d.f. (for `sex`, 1; `tank`, 3;, `age`, 1, and `period`, 4);\
+    $\mathbf{X}$ is the 3200 x 9 design matrix for $\mathbf{b}$;\
+    $\mathbf{u}$ is a 4400 x 1 vector of breeding values assumed random and distributed MVN(0,${{V}_{a}}\mathbf{A}$) where $\mathbf{A}$ is the Numerator Relationship Matrix and ${{V}_{a}}$ is the additive genetic variance;  \
+    ${{\mathbf{Z}}_{1}}$ is the 3200 x 4400 design matrix for $\mathbf{u}$;\
+    $\mathbf{v}$ is a 1600 x 1 vector of permanent environment effects for the individuals assumed random and distributed MVN(0,${{V}_{i}}\mathbf{I}$) where $\mathbf{I}$ is the appropriate identity matrix and ${{V}_{i}}$ is the permanent environmental variance;\
+    ${{\mathbf{Z}}_{2}}$ is the 3200 x 1600 design matrix for $\mathbf{v}$;\
+    $\mathbf{d}$ is a 200 x 1 vector of maternal effects for the individuals assumed random and distributed MVN(0,${{V}_{d}}\mathbf{I}$) where $\mathbf{I}$ is the appropriate identity matrix and ${{V}_{d}}$ is the maternal environmental variance;\
+    ${{\mathbf{Z}}_{3}}$ is the 3200 x 200 design matrix for $\mathbf{d}$;\
+    $\mathbf{e}$ is a 3200 x 1 vector of residuals assumed random and distributed MVN(0,${{V}_{e}}\mathbf{I}$) where $\mathbf{I}$ is the appropriate identity matrix and ${{V}_{e}}$ is the residual variance.
+
+-   Q7. Is there evidence of an environmental time trend in the data?
+
+-   $\mathbf{Answer.}$ The formal test of the null H0: 'period effects were all equal' with an alternative H1: 'not H0' is given by the Wald test which has `Pr` = 0.30 i.e. if H0 were true then the test statistic would be as large as this or greater with probability 0.3. Therefore it does not reach the threshold of significance for Type 1 error = 0.05, and so there is no evidence for period effects. Alternative approaches for modelling environmental trends are explored in Tutorial 5. (In this simulated data there is no true environmental trend).
+
+-   Q8. Is there evidence of a difference in the trait between the two ages?
+
+-   $\mathbf{Answer.}$ Definitely. The Wald test is H0: 'there was an age difference' with an alternative H1: 'not H0' and `Pr` = 0.008. Therefore it is significant P\<0.01; so there is evidence of a difference between the two ages, with age 2 greater than age 1 by 3.3 g with s.e. 1.2 g. (The question did not state the Type 1 error for the test so use standard thresholds of 0.05, 0.01 and 0.001 to assess evidence).
+
+# Heritabilities and Repeatabilities
+
+There are a number of functions of the variance components that are of interest:
+
+a.  phenotypic variance ($V_p = V_a+V_i+V_m+V_e$),
+b.  heritability ($V_a/V_p$),
+c.  fractions of variance that are permanent environment ($V_i/V_p$) ...
+d.  ... and maternal ($V_m/V_p$).
+
+In addition there is interest in repeatabilities, what is the total fraction of the phenotypic variance that is intrinsically determined by the individual and its life history and shared across the repeated measurements. This is ALWAYS greater than or equal to the heritability.
+
+e.  repeatability $(V_a+V_i)/V_p$
+
+Finally the fraction of variance accounted for by identified sources.
+
+f.  ... $(V_a+V_i+V_m)/V_p$.
+
+## Question 9
+
+-   Q9. Calculate the remaining 5 functions of the variance components listed above. Use the code block below. The code for V_p is entered as a reminder of the code.
+
+```{r}
+vpredict(tut3.asr, q9a ~ V1+V2+V3+V4)
+vpredict(tut3.asr, q9b ~ V3/(V1+V2+V3+V4))
+vpredict(tut3.asr, q9c ~ V2/(V1+V2+V3+V4))
+vpredict(tut3.asr, q9d ~ V1/(V1+V2+V3+V4))
+vpredict(tut3.asr, q9e ~ (V3+V2)/(V1+V2+V3+V4))
+vpredict(tut3.asr, q9f ~ (V3+V2+V1)/(V1+V2+V3+V4))
+data.frame(Parameter= c('Vp','h2','Vi/Vp','Vd/Vp','Va+Vi)/Vp)','(Va+Vi+Vd)/Vp'),
+           Estimate = c(2960.280,0.303,0.167,0.112,0.470,0.582),
+           SE       = c( 148.641,0.064,0.040,0.022,0.034,0.024))
+```
+
+# Hypothesis Testing for Random Effects in REML
+
+For random effects a common question is does the data give us evidence for a form of variation, e.g. additive genetic variance? The Null Hypothesis is H0: $V_a$ = 0 and the Alternative Hypothesis is H1: $V_a$ \> 0.
+
+-   Note that H1 is one-sided because variances can't be negative as they are the average squared deviation from the mean and squares are positive!
+
+A complication of hypothesis testing for random effects is that unlike fixed effects the s.e. depends on the estimate itself - in particular the s.e. for $V_a$ = 0 is smaller than when $V_a$ \> 0, and what is calculated and displayed in the output is the value of the s.e. using the estimate! So we CANNOT simply compare the component to its s.e. although this can often be indicative. Instead we do LIKELIHOOD RATIO TESTS.
+
+-   Compare this with estimating a regression slope by least squares the s.e. does not depend on whether or not the true value of the slope is large or small in magnitude, or positive or negative, it only depends on how big the residual variance is and the design of the study.
+
+## Conducting a Likelihood Ratio Test (LRT)
+
+1.  Fit the full model and find the log likelihood (say logL1);
+    -   this is the likelihood with the alternative hypothesis H1
+2.  Drop the term from the model corresponding to the variance component being tested and run the model again and record the log likelihood (say logL0)
+    -   this is the likelihood with the null hypothesis H0
+    -   note logL1 \> or = logL0 ALWAYS as an extra term to explain the data can never decrease the likelihood;
+3.  Calculate the test statistic, 2x(logL1-logL0);
+4.  Compare this to chi-squared with 1 d.f. (we are dropping 1 component);
+5.  Determine the significance, which is the unusual bit ...
+    -   for a 5% significance level, the critical value is the 90% value of chi-squared with 1 d.f. (`qchisq(0.90,1)` = 2.706),
+    -   for a 1% significance level the critical value is the 98% value (`qchisq(0.98,1)` = 5.412), and
+    -   for a 0.1% significance level the critical value is the 99.8% value (`qchisq(0.998,1)` = 9.550).
+
+### Why Step 5?
+
+An explanation and demonstration is given in testing.html provided! Knowing how to carry out the appropriate LRT is important, the deeper understanding of why the critical value is modified as optional.  
+
+## Demonstrating the LRT
+
+There is a lot of code below but 80% of it is for tidying the output for readers!
+
+```{r results='hold'}
+# Step (i) outcome from the full model already fitted
+print(paste0("FULL model with logL = ",tut3.asr$loglik))
+#
+cat("\n")
+print("DROPPING idv(dam) in a REDUCED model")
+tut3.red <- asreml(fixed= weight ~1+sex+tank+age+period, random= ~vm(id,ainv)+idv(idi), residual= ~idv(units), data=tut3)
+# Step (ii) outcome from the reduced model
+print(paste0("REDUCED model with logL = ",tut3.red$loglik))
+# Step (iii) the test statistic
+ts <- 2*(tut3.asr$loglik-tut3.red$loglik)
+print(paste0("Test statistic = ",ts))   
+# Steps (iv) and (v) 
+print(paste0("Is it P<0.05  ... ",(ts>qchisq(0.90,1))))     
+print(paste0("Is it P<0.01  ... ",(ts>qchisq(0.98,1))))
+print(paste0("Is it P<0.001 ... ",(ts>qchisq(0.998,1))))  
+#
+cat("\n")
+print("DROPPING idv(idi)")
+tut3.red <- asreml(fixed= weight ~1+sex+tank+age+period, random= ~vm(id,ainv)+idv(dam), residual= ~idv(units), data=tut3)
+# Step (ii) outcome from the reduced model
+print(paste0("REDUCED model with logL = ",tut3.red$loglik))
+# Step (iii) the test statistic
+ts <- 2*(tut3.asr$loglik-tut3.red$loglik)
+print(paste0("Test statistic = ",ts))   
+# Steps (iv) and (v) 
+print(paste0("Is it P<0.05  ... ",(ts>qchisq(0.90,1))))     
+print(paste0("Is it P<0.01  ... ",(ts>qchisq(0.98,1))))
+print(paste0("Is it P<0.001 ... ",(ts>qchisq(0.998,1)))) 
+#
+cat("\n")
+print("DROPPING vm(id,ainv)")
+tut3.red <- asreml(fixed= weight ~1+sex+tank+age+period, random= ~idv(idi)+idv(dam), residual= ~idv(units), data=tut3)
+# Step (ii) outcome from the reduced model
+print(paste0("REDUCED model with logL = ",tut3.red$loglik))
+# Step (iii) the test statistic
+ts <- 2*(tut3.asr$loglik-tut3.red$loglik)
+print(paste0("Test statistic = ",ts))   
+# Steps (iv) and (v) 
+print(paste0("Is it P<0.05  ... ",(ts>qchisq(0.90,1))))     
+print(paste0("Is it P<0.01  ... ",(ts>qchisq(0.98,1))))
+print(paste0("Is it P<0.001 ... ",(ts>qchisq(0.998,1))))  
+```
+
+### Questions 10 to 13
+
+-   Q10. Choose one of $V_a$, $V_i$ or $V_d$ and write down the null and alternative hypotheses being tested in the LRT above.
+-   $\mathbf{Answer.}$ Null H0: V = 0 with the alternative H1: V \>0 for all!
+-   Q11. For the chosen component, check the calculation of the test statistic from the appropriate logL1 and logL0.
+-   $\mathbf{Answer.}$ Take the difference and remember to double! In the order of the code, the first statistic is 66.40 for $V_d$ (i.e. dropping `idv(dam)`); the second is 20.17 for $V_i$; the third is 52.25 for $V_a$.
+-   Q12. What are the statistical significances of the LRTs for $V_a$, $V_i$ and $V_d$?
+-   $\mathbf{Answer.}$ All P\<0.001.
+-   Q13. What is the test statistic and the critical value of a statistical test of a Null Hypothesis H0: $h^2$ = 0 against an Alternative Hypothesis H1: $h^2$ \> 0 with Type 1 error = 0.05.
+-   $\mathbf{Answer.}$ The hypotheses are identical to those for $V_a$; so the test statistic is 52.25, critical value for Type 1 error is 2.706 (which is from qchisq(0.90,1) i.e. the 90 %-ile).
+
+# Biases of wrong models
+
+With real data, all models are wrong but some models are more wrong than others! Below, two of the reduced models are fitted again and their summaries are produced. Look at what happens to the estimate of $V_a$.
+
+## Omitting the permanent environment
+
+```{r results='hold'}
+tut3.red <- asreml(fixed= weight ~1+sex+tank+age+period, random= ~vm(id,ainv)+idv(dam), residual= ~idv(units), data=tut3)
+qgm_summary(tut3.red)
+```
+
+## Omitting the maternal effect
+
+```{r results='hold'}
+tut3.red <- asreml(fixed= weight ~1+sex+tank+age+period, random= ~vm(id,ainv)+idv(idi), residual= ~idv(units), data=tut3)
+qgm_summary(tut3.red)
+```
+
+In both the reduced models the estimate of $V_a$ is increased.
+
+## Question 14
+
+-   Q14. Why do the estimates of Va increase in the reduced models?
+-   $\mathbf{Answer.}$ The answers lie in where is the information come from and in what way does the model offered by the experimenter allow this information to be interpreted!
+    -   When using pedigree evidence for genetic variance comes from covariances among relatives such as parent and offspring and among half- and full-sibs. When the only source of genetic variance is additive the variance between dams and sires should be equal. Any excess observed among dams will provide a source of evidence for maternal variance.When there is maternal variance the variance among dams is greater than among sires, and if the maternal variance is not fitted in the model then the model can only interpret this extra covariance as additive genetic variation, and must reconcile the estimates from the sires and the dams by inflating the estimate of ${{V}_{a}}$.
+    -   When there is permanent environmental variance then repeated records on individuals are more similar than would be expected form genetics alone. In the absence of the permanent environment variance in the model, the only remaining term in the model that may explain the similarity of repeated records is genetic. Therefore the model can only interpret the extra similarity among repeated records as evidence of a larger ${{V}_{a}}$. The estimate of ${{V}_{a}}$ will still need to reconcile this information from the repeated records with the other sources of information coming from the covariances of the sibs, any parents and offspring etc. but the missing permanent environmental term will tend to inflate the estimate of ${{V}_{a}}$ to help explain the similarity of repeated records.
+
+# More Likelihood Ratio Tests
+
+Return to the data files for TUTORIALS 1 & 2.
+
+## Questions 15 to 16
+
+-   Q15. Carry out a LRT for Tutorial 1 of H0: $V_s$ = 0 against H1: $V_s$ \> 0 with Type 1 error 0.01.
+-   $\mathbf{Answer.}$ The test statistic was 2x(1754.452-1744.537) = 19.829, the critical value is `qchisq(0.98,1)` = 5.412, so there is sufficient evidence to reject H0 in favour of H1, that $V_s$ \> 0.
+-   Q16. Carry out a LRT for Tutorial 2 of H0: $V_a$ = 0 against H1: $V_a$ \> 0 with Type 1 error 0.001.
+-   $\mathbf{Answer.}$ The test statistic was 2x(1754.452-1739.853) = 29.198 (the reduced model was identical to that of Q15), the critical value is `qchisq(0.998,1)` = 9.550, so there is sufficient evidence, even with Type 1 error of 0.001, to reject H0 in favour of H1, that ${{V}_{a}}$ \> 0.
+
+```{r}
+tut1 <- read.csv(file="rdat1.csv", header= TRUE, na.strings=c("NA"))
+tut1$sex <- factor(tut1$sex)
+tut1$tank <- factor(tut1$tank)
+tut1$id <- factor(tut1$id) 
+tut1$sire <- factor(tut1$sire) 
+logl0 <- summary(asreml(fixed= weight ~ 1 + sex + tank, residual= ~ idv(units), data=tut1, trace= FALSE))$loglik
+logl1 <- summary(asreml(fixed= weight ~ 1 + sex + tank, random= ~ vm(sire,ainv), residual= ~ idv(units), data=tut1, trace= FALSE))$loglik
+logl2 <- summary(tut2.asr <- asreml(fixed= weight ~ 1 + sex + tank, random= ~ vm(id,ainv), residual= ~ idv(units), data=tut1, trace= FALSE))$loglik
+cat("\n")
+"LIKELIHOODS"
+c(logl0,logl1,logl2)
+"SIRE MODEL test statistic"
+2*(logl1-logl0)
+cat("\n")
+"INDIVIDUAL (ANIMAL) MODEL  test statistic"
+2*(logl2-logl0)
+```
+
+# Outcomes
+
+We have covered:
+
+-   how to run an a Repeatability Model with repeated records using `asreml()`;
+-   how to add other environmental terms to the `fixed=` and `random=` models;
+-   how to carry out Likelihood Ratio Tests for the variance components of H0: V = 0 against H1: V \> 0;
+-   the potential impacts of fitting poor models

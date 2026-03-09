@@ -1,0 +1,377 @@
+---
+title: "Tutorial 1: Sire Model"
+author: "QGM team"
+date:  '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this and the next tutorial we will carry out the basic work flow of fitting a model: (i) reading in the data, (ii) exploring the data, (iii) running a model, (iv) assessing the output, and (v) testing alternative models. In Tutorial 1 we will consider obtaining estimates and in Tutorial 2 we will address testing hypotheses. In the tutorial we will (slightly) jump ahead of the lectures and use Restricted Maximum Likelihood (REML) to estimate the genetic variance before obtaining the BLUP values in a sire model instead of assuming it is known - however the only consequence of this for this tutorial is that we will be assuming the estimate of heritability obtained from REML is in fact the true value.
+
+## Preamble to Answers
+
+In Tutorial 1 we are looking at the Sire Model in a pedigree with 11 discrete generations represented, including a base generation (generation 0), but where the only recorded information on the trait of interest is in the last generation 10, with all sires and dams from generation 9.
+
+-   In the Sire Model the estimates are PTAs, the expected superiority of the offspring.
+-   An individual's own recorded phenotype helps to estimate its sire's PTA
+-   An individual's own PTA comes from its relationship to all the sires with recorded offspring
+-   Consequently, only the sires in generation 9 have PTAs are *directly* estimable from the data
+    -   i.e. if you used a standard ANOVA model with sire as a factor the ANOVA would fail unless the factor was restricted to only those individuals in generation 9 used as sires.
+-   However all individuals have PTAs as the Sire Model uses the numerator relationships derived from the pedigree to spread all the available information throughout the pedigree. The stronger the relationship an individual has with individuals directly estimable from the recorded data the more useful (and hence the more accurate) the recorded data is for estimating its PTA.
+-   Remember numerator relationships are defined by the (co)variances of breeding values and transmitting abilities are ½ a breeding value, so the numerator relationship is also contains the information on the covariances of transmitting abilities!
+
+# Setting up
+
+## Load the libraries
+
+The `asreml` library is central to the course. Other libraries will be used in later tutorials, and will $\textbf{not}$ need to be memorised.
+
+```{r results='hide'}
+library("asreml")
+```
+
+## Load the QGM helpers
+
+-   In QGM, the focus is on understanding genetic models and the process of fitting and validating them, and is not concerned with being able to deploy complex R commands that are not involved in defining and running models. Therefore a number of 'QGM helper' functions are provided to carry out some tasks and extract particular information from analyses. These functions have a prefix 'qgm\_' and will ALWAYS be available in all tutorials and assessments - they are there to help!
+-   The individual functions will be introduced on their first use. Some of the functions have substantial code and so all the functions are read in from an `R` file containing them. If interested in the code then look in the R file, or click on the function name in the environment panel of RStudio - entirely optional! It is also possible to use `fix()`, e.g. `fix(qgm_summary)`, but beware this allows editing it - and maybe creating a bug.
+-   The code of the helper functions is written by JAW who is not an R expert and so it is not necessarily the most concise or most efficient. It is written for the QGM course - there is no guarantee that any routine will work outside the course, so beyond QGM 'caveat emptor' applies.
+
+```{r}
+source(file="qgm_helpers_t1.R")
+```
+
+# Reading files for analyses
+
+## Phenotypic data
+
+For QGM the files provided will typically be `.csv` files and can be read using `read.csv()`. They will usually have headers so `header=TRUE`, with missing data identified by `NA`, which is the default for R. Exceptions to this will be flagged! QGM will mostly use simulated data. In Tutorial 1 the data replicates the body weight of silver carp in grams (g) at the end of their growth period. It is worth doing the simple check of looking at the top and bottom of files after reading. Many problems will be spotted by this simple test.
+
+```{r}
+tut1 <- read.csv(file="rdat1.csv",header=TRUE,na.strings=c("NA"))
+head(tut1)
+tail(tut1)
+```
+
+The row numbers are given in the data frame and so the tail shows there are 400 rows of 7 variables with column names. Some useful tools: `unique()` looks at the number of unique values in a column, so `length(unique())` is the number of values in the column; `table()` provides simple tables for the unique codes, and `addmargins(table())` adds marginal totals! It shows `generation` = 10 for all data points, 2 sexes and 4 tanks, close to equally distributed across the 8 classes. Sex 1 are males and provide the sires, sex 2 are females and provide the dams. For a variate there are functions `summary()`, `sd()`, `hist()`, which provide useful information.
+
+-   When using `hist()`, explore the use of `breaks` - if you have many data points on a continuous scale then increase the breaks to get a better idea of distributional shape!
+
+```{r}
+# Looking at GENERATIONS
+unique(tut1$gen) # the unique values of generation
+length(unique(tut1$gen)) # the number of unique values
+# Looking at SEXES & TANKS"
+addmargins(table(tut1$sex,tut1$tank)) # a two way classification of sex and tank
+# Looking at WEIGHT"
+summary(tut1$weight)
+sd(tut1$weight,na.rm=TRUE)
+hist(tut1$weight) # a very rough histogram
+hist(tut1$weight,breaks=20) # ... more interesting
+hist(tut1$weight,breaks='FD') # ... a robust way avoiding guessing ...
+```
+
+## Pedigree data
+
+### General points about pedigree information
+
+-   Pedigree information tends to have standard formats of three columns: assumed to be identity, sire and dam. Well-constructed pedigree information will have records for the parents occurring before the offspring to make the construction of the Numerator Relationship and/or its inverse easier - remember QG! Often software will be able to sort records into an acceptable order but this may not always be the case.
+-   The convention is that 0 in the sire or the dam column indicates a missing parent identity. In practice, *never* use 0 as an identity of a real individual - it could cause chaos. In R `NA` can replace the 0.
+-   `asreml()` assumes 0 is a missing identity, as well as `NA`
+-   In QGM, pedigree files will usually be given separately to the data files. In practice, short pedigrees, e.g. groups of half sibs with records, the pedigree can be included in the columns of the data files.
+-   There may be many sires and dams, which we don't want to list, but knowing their numbers helps to understand the power of our data and where the genetic information is coming from. To do this there is a special QGM helper function `qgm_ped_summary()` is provided since tabulation of potentially large numbers of sires and dams to summarise them is not feasible. The input is simply a data frame which has 3 columns: and identity, the sire, and the dam.
+
+### Pedigree information in `tut1`
+
+Look at the pedigree in the records contained in `tut1` which contains the identity, sire and dam in the first 3 columns.
+
+```{r}
+qgm_ped_summary(tut1[,1:3])
+```
+
+-   It is clear that the 400 data points come from 400 identities, so 1 record/individual - confirmed since the maximum and minimum number of records per identity are both 1.
+-   All individuals have sire and dam identified (not 0 or `NA`).
+-   There are 10 sires so the average offspring per sire is 400/10 = 40. The max and min show that all sires actually have 40 offspring.
+-   There are 50 dams so the average is 400/50 = 8 offspring per dam. The max and min show that all sires actually have 8 offspring.
+-   There are 50 mating pairs, each dam is mated to only one sire, but each sire is mated to 5 dams - a hierarchical mating design.
+-   It is therefore clear that each dam has a full-sib family of 8 offspring, and the sire has 40 offspring with 5 full-sib families of offspring each.
+-   The final comments are for checking that things are as expected for a dioecious species.
+-   In fact the family structure is balanced - one can see this is in the data, but 400 records are much more easily scanned than 4000! Getting some idea of of family structure is important in understanding where genetic information is potentially coming from - here it is from primarily from paternal half-sibs supplemented by full-sibs.
+    -   there are 50x0.5x8x7 = 1400 full-sib pairs, and (10x0.5x40x39-1400) = 6400 paternal half-sib pairs
+
+# Preparing the sire model
+
+## Defining factors
+
+We need to define factors in the analysis. Here we have `sire`, `sex` and `tank`. The `asreml()` function has a naming convention using their version of reading tables, however we recommend being explicit in how terms are fitted in the model. What follows is standard R. There are three factors:
+
+i)  `sex`, fixed with 1 d.f.,
+ii) `tank` fixed with 3 d.f. and
+iii) `sire` which will be fitted as random
+
+```{r}
+tut1$sex <- factor(tut1$sex)
+tut1$tank <- factor(tut1$tank)
+tut1$sire <- factor(tut1$sire) 
+```
+
+## The full pedigree
+
+-   The sire model will account for the relationships among the sires as more is known about the sires and dams than is shown in the data file! Therefore in our sire model the sires will be treated as random with a distribution $MVN(0, V_s \mathbf{A})$ where $V_s$ is the variance among sires and $\mathbf{A}$ is Wright's Numerator Relationship Matrix.
+    -   it is *always* necessary to state the assumed distribution when a factor is declared as random.
+-   The pedigree file `rped1.csv` is read in which allows ASReml to construct the inverse of $\mathbf{A}$, i.e. $\mathbf{A}^{-1}$, as it is the inverse that is used in the calculation. Only the first 3 columns are necessary but the data has a couple of extra columns that are included for use later.
+    -   this pedigree file is presented in standard format: parents precede offspring and unknown parents are coded 0.
+
+```{r}
+ped <- read.csv(file= "rped1.csv", header= TRUE, na.strings=c("NA"))
+head(ped)
+tail(ped)
+qgm_ped_summary(ped)
+```
+
+-   `qgm_ped_summary(ped)` gives some more information
+    -   there are 4400 individuals in the full pedigree!
+    -   of these 400 are a base generation with no recorded sire or dam
+    -   note that not all become parents, and the family sizes are only considering those individulas that have at least one offspring in the `ped` data frame\
+-   The structure in any generation can be seen by looking at a subset of `ped` e.g. for generation 5 by `qgm_ped_summary(ped[ped$generation %in% c(5),])`
+-   Information on a particular generation can be obtained by creating a reduced data frame e.g. `ped5 <- ped[ped$generation %in% c(5),]` which has only records for generation 5.
+
+### Questions 1 to 3
+
+-   $\textbf{See code block below}$
+-   Q1. How many generations are represented in the pedigree?
+-   $\mathbf{Answer.}$ 11.
+-   Q2. How many males (`sex`= 1) and females (`sex`= 2) are there in the base generation?
+-   $\mathbf{Answer.}$ 200 of each sex.
+-   Q3. Do all generations have the same mating structure? (Just a sample will do!)
+-   $\mathbf{Answer.}$ The code below samples a few generations of the pedigree although a full answer requires all! The answer is they are identical in structure.
+
+```{r}
+length(unique(ped$generation))
+ped0 <- ped[ped$generation %in% c(0),]
+table(ped0$sex)
+qgm_ped_summary(ped[ped$generation %in% c(0),])
+qgm_ped_summary(ped[ped$generation %in% c(1),])
+qgm_ped_summary(ped[ped$generation %in% c(7),])
+qgm_ped_summary(ped[ped$generation %in% c(10),])
+```
+
+## Obtaining the A-inverse
+
+To fit the model with pedigree the inverse of the numerator relationship is required. This is easy in `asrem()`!
+
+```{r}
+ainv <- ainverse(ped[,1:3])
+```
+
+# Fitting the Model
+
+## The `asreml()` function
+
+-   Now we are ready to fit a model in `asreml()` and estimate a variance component. Just like `lm()` the output of `asreml()` has different parts which is held in an output object that we can examine afterwards - below this is `tut1.asr`.
+-   The call as we will use it has 4 parts:
+    i)  the `fixed=` part which includes the y-variate, and the fixed factors,
+    ii) the `random=` part which has all the random terms other than the residual,
+    iii) the `residual=` term, and
+    iv) the `data=` which is simply the name of the data frame which contains all the terms in the model.
+-   Note the form of the terms below in `random` and `residual` have functions `idv()` and `vm()` around them. Sometimes (only sometimes) these are not needed but it is strongly advised as it makes clear the distributional assumptions.
+    -   The (co)variance matrix of sire is $V_s \textbf{A}$, and this is shown by the term `vm(sire,ainv)` where `vm()` denotes 'variance model',
+    -   The (co)variance matrix of residuals is $V_e \textbf{I}$ and this is shown by the term `idv(units)`, where `idv()` denotes the 'identity' matrix.
+
+```{r}
+tut1.asr <- asreml(fixed= weight ~ 1 + sex + tank, random= ~ vm(sire,ainv), residual= ~ idv(units), data=tut1) 
+```
+
+-   Note that in REML the computer has to iterate towards a solution unlike simple regression where there are reasonably simple formulae for calculating the parameters precisely from the data. In REML, over iterations the likelihood should increase and gradually the changes should become smaller and smaller and converge to the maximum value.
+
+### Question 4
+
+-   Q4. Write out the model formula.
+-   $\mathbf{Answer.}$ The full model formula is $\mathbf{y} = \mathbf{1}m + \mathbf{Xb} + \mathbf{Zu} + \mathbf{e}$, where\
+    $\mathbf{y}$ is (400x1) vector of phenotypes for weight in silver carp\
+    m is a scalar (i.e a single number) fitted mean\
+    $\mathbf{1}$ is a (400x1) vector of 1's (the design 'matrix' for the mean)\
+    $\mathbf{b}$ is a (4x1) vector of fixed effects with 1 d.f. for sex and 3 d.f. for tank\
+    $\mathbf{X}$ is the (400x4) design matrix for the fixed effects\
+    $\mathbf{u}$ is a (4400x1) vector of transmitting abilities assumed to be random and distributed MVN(0,$V_s \mathbf{A}$), where $\mathbf{A}$ is the Numerator Relationship Matrix and $V_s$ is the variance among sires\
+    $\mathbf{Z}$ is the (400x4400) design matrix for the random effects\
+    $\mathbf{e}$ is a (400x1) vector of residuals assumed to be random and distributed MVN(0,$V_e \mathbf{I}$), where $\mathbf{I}$ is the (400x400) Identity matrix and $V_e$ is the residual variance\
+-   $\textbf{Note}$
+    -   In the model, $\mathbf{u}$ is a vector of Transmitting Abilities $\textbf{not}$ a vector of Predicted Transmitting Abilities. The PTAs are the predictions of these Transmitting Abilities and are the outcome of fitting the model.
+    -   Effects must be defined as being either fixed or random. (The mean is always fixed and can be assumed to be fixed)
+        -   a fixed effect must be associated with d.f. and does not have distributional assumptions
+        -   a random effect must have distributional assumptions and does not have associated d.f.
+    -   Why 400? 400 is the number of records that have information and used in the estimation
+    -   Why 4400? 4400 is the length of the pedigree
+    -   The first dimension of $\mathbf{y}$, $\mathbf{e}$ and all design matrices is the number of records
+    -   Remember in matrix multiplication the second dimension of the first matrix must equal the first dimension of the second matrix.
+    -   In publications, one would expect to see model equations in this detail, although typically the explicit shapes of matrices and vectors are not given, as the dimensions will be implicit from the other information given in the Methods. However, in QGM, I expect the shapes to be given in the model formulae.
+    -   Sometimes, instead of $\mathbf{1}m + \mathbf{Xb}$ only $\mathbf{Xb}$ is given, that is perfectly acceptable (as the mean *m* is a fixed effect) *providing* the description of $\mathbf{b}$ that is given includes the 1 d.f. for the mean!
+
+## Looking at the output
+
+So the model has run, and we need to look at what happened. In QGM we will use the standard QGM helper function: `qgm_summary()`. The argument needed is the output from the asreml call and this extracts key information that we need of 4 types described below.
+
+```{r}
+qgm_summary(tut1.asr)
+```
+
+### Convergence & Likelihood
+
+Has it converged? Yes, if it had not converged it is not useable! Also check the convergence over iterations was steady, although usually erratic iterations will not result in convergence - there are no problems in this analysis. The log-likelihood is given which will be used in later tutorials.
+
+### Variance Components
+
+A data frame showing the components: the sire variance component is the estimate given by `vm(sire,ainv)` and the residual is the estimate given by `units!units`. The data frame also shows their s.e.'s, and the `z.ratio` which is the component divided by its s.e. which is an approximate t-value.
+
+-   The `z.ratio` is NOT used as a test of a variance component because for random effects the s.e. is a function of the size of component is large or small - this is not the case with fixed effects, for example the s.e. of a mean of a sample from a normal distribution is $\sqrt{V_e/n}$ which does not depend on what the mean is. See the next section. We will address hypothesis testing in the next tutorial.
+-   The `units!R` row can be ignored in QGM.
+-   There are two further checks on the reliability of the results in this table.
+    i)  The components should have `P` in the `bound` column which means that the component is positive and is not bound (`B`) with a very small value that ASReml has artificially used to represent 0 - i.e. it is bound to zero. When you see `B` the answer is zero and there is no s.e. provided it is reported as 0 with a note stating it was bound. `F` stands for fixed, but this can be ignored here. There are other outcomes which are more problematical!
+    ii) The `%ch` column should be 0. This column shows the % change in the component in the last iteration, sometimes this may be non-zero and very small even if the likelihood has converged. If so, this can be overcome by a few more iterations- not needed in this analysis.
+
+### Fixed Effects & Wald Tests
+
+These are given in a data frame with estimate, s.e. and the z.ratio (i.e. an approximate t-value). As with variance components the t-values are not used to test for significance of factors, instead Wald tests are used, which are shown in another data frame.
+
+-   The `(Intercept)` term is what is used as the mean. We can see here that `asreml()` by default uses an identifiability constraint that sets the first level of a factor to be 0. We will not look at Wald tests further in this tutorial but will do so in the next one!
+
+# Looking at the PTAs
+
+## Extract from `tut1.asr`
+
+The estimates obtained from fitting a Sire Model are the predicted superiority or inferiority of the offspring of the sires, these are called Predicted Transmitting Abilities or PTAs. The PTAs are extracted from the ASReml output, but it is not easy, so in QGM there is a helper function `qgm_random_effects()` which has the `asr` output and the model term as input and returns a data frame with the relevant information below. So use this function to get the PTAs ...
+
+```{r}
+pta <- qgm_random_effects(tut1.asr,"sire")
+head(pta)
+tail(pta)
+nrow(pta)
+```
+
+It has 4400 rows although the phenotypic data only had 10 sires!
+
+### Question 5
+
+-   Q5. Why does the data frame `pta` have 4400 rows?
+-   $\mathbf{Answer.}$ Because the $\mathbf{A}$ matrix used in the model has information on 4400 individuals. If individual i is related (however distantly) to at least one sire with recorded offspring, the covariance of its breeding value or transmitting ability with at least one sire with direct information is non-zero and a prediction can be made for the transmitting ability, and so the PTA is not precisely 0. If an individual is completely unrelated all sires with recorded offspring the PTA is 0.
+
+## ... and merge with the other pedigree data
+
+The following code merges PTAs with the pedigree file after a bit of renaming and get a new data frame `pedx`
+
+```{r}
+colnames(pta)
+colnames(pta)[1] <- "pta"
+colnames(pta)[2] <- "se"
+colnames(pta)[4] <- "id" # rename pta$levels as pta$id to match with ped data frame ready for merging
+pedx <- merge(ped, pta, by = "id")
+head(pedx)
+tail(pedx)
+```
+
+## Look at PTAs in generation 9
+
+Look at PTAs for generation 9, the generation with the sires in, and obtain the histograms of PTAs and s.e.s.
+
+```{r}
+hist(pedx[pedx$generation %in% c(9),]$pta,breaks=20)
+hist(pedx[pedx$generation %in% c(9),]$se,breaks=20)
+```
+
+### Questions 6 to 7
+
+-   Q6. All 400 individuals in generation 9 have PTAs different from 0, including the females, why?
+-   $\mathbf{Answer.}$ After 9 generations all individuals are related to one another to some degree, and so all individuals have some information on their PTA, which includes the females.
+-   Q7. In the histogram of prediction s.e.s a small number of individuals have greater precision. Which are these individuals?
+-   $\mathbf{Answer.}$ These are the sires. The s.e.s are smaller as they have direct information on their Transmitting Ability from their offspring. Other individuals only have more indirect, lower quality information, through their relationship with these individuals and so they have greater prediction errors.
+
+## ... and generation 10
+
+Look at PTAs of generation 10, the last generation and the only generation with recorded data. In the code block below, obtain the histogram of the PTAs for generation 10 and print out the head of `pedx`.
+
+```{r}
+hist(pedx[pedx$generation==10,]$pta,breaks=20)
+hist(pedx[pedx$generation==10,]$se,breaks=20)
+head(pedx)
+pedx[4001:4025,]
+```
+
+### Questions 8 to 11
+
+-   Q8. What is the predicted superiority or inferiority of the offspring of id=4001?
+    -   $\mathbf{Answer.}$ -2.000 to 3 d.p. with s.e. 20.664.
+    -   all estimates should have s.e.s when available, and are expected in QGM answers
+-   Q9. What is the expected breeding value (EBV) of id=4001 using this model?
+-   $\mathbf{Answer.}$ A transmitting ability is half a breeding value. So with this model the best estimate of the breeding value is twice the PTA i.e. -4.000 to 3 d.p. with s.e. 41.328
+-   Q10. Why do all the full sibs in a family born in generation 10 have the same value despite having different phenotypes?
+-   $\mathbf{Answer.}$ They have the same sire and dam, and the model uses no other information from the data that is able to separate the full-sibs. Just having the same sire is insufficient - scan some PTAs - for the following reason: in the sire model, the dams have PTAs that are predicted from relationships with the sires; therefore, two dams with different relationships to the sires will have different PTAs. Since in generation 10 the full-sibs in generation have their PTAs predicted only from their sires and dams the full-sibs are identical but paternal half-sibs (or maternal half-sibs) can differ.
+-   Q11. All individuals in the pedigree have a PTA: what will be the PTA of an individual that was completely unrelated to generation 10, e.g. an unselected individual in the base generation?
+-   $\mathbf{Answer.}$ It will 0 - as stated in answer to Q5.
+
+# Estimates of contrasts for fixed effects
+
+One of the data frames printed out in the fixed effects gives the estimates for the fixed effects. However the information does not allow us to estimate contrasts other than differences between one level and the first as the the s.e. of other differences are not given. What if other information is required?
+
+-   A contrast is a linear function of the effects of a factor with coefficients that sum to 0.
+
+Suppose it was found that the filtration of Tank 1 was faulty and Tank 4 had a thermostat calibration error. The question would be is how much impact these problems might have had.
+
+## A contrast ... the filtration impact
+
+The estimate of the weight achieved in a faulty tank is Tank 1 itself. A good estimate of normal tanks would be the average of Tanks 2 & 3, i.e. (0.5x`tank_2` + 0.5x`tank_3`). Therefore the estimate of the impact caused by filtration is therefore 1.0x`tank_1`- 0.5x`tank_2` - 0.5x`tank_3`
+
+-   This is a contrast with $\textbf{c}_t = (1.0, -0.5, -0.5, 0.0)^T$.
+
+In QGM there is a helper function `qgm_fixed linear()` to calculate such a contrast AND provide its standard error so we can assess the strength of the evidence!The input is the output structure, here `tut1.asr` and the contrast. For this example:
+
+```{r}
+ct <- c(1.0,-0.5,-0.5,0.0)
+qgm_fixed_linear(tut1.asr,"tank",ct)
+```
+
+The estimate is that the breakdown caused a decrease of 26.82 (s.e. 5.96) units: the evidence is very strong that the breakdown in filtration caused a problem.
+
+## ... and the calibration error
+
+### Question 12
+
+-   Q12. What was the estimate of the impact of the calibration error in Tank 4?
+-   $\mathbf{Answer.}$ The estimate was -40.60 (s.e. 5.88). See below for the code.
+
+```{r}
+ct <- c(0.0,-0.5,-0.5,1.0)
+qgm_fixed_linear(tut1.asr,"tank",ct)
+```
+
+# Estimates of variance after fitting the model.
+
+ASReml provides a function `vpredict()` for calculating functions of the variance components, e.g. phenotypic variance, which is the sum of component. It provides a s.e. for the phenotypic variance which accounts for the uncertainties in the components.
+
+-   The function uses the components in the data frame provided by `qgm_summary()` which are labelled `V1` and `V2` in the function in the order shown in `qgm_summary()`. Note the capitals!
+-   `vp` is my own name - it can be whatever you wish to name the function
+
+```{r}
+vpredict(tut1.asr, vp ~ V1+V2) # phenotypic variance
+```
+
+# Outcomes
+
+We have covered:
+
+-   ways of describing data and pedigrees prior to analysis, including the use of `qgm_ped_summary`;
+-   how to read and prepare pedigrees for `asreml()`;
+-   how to run an analysis using `asreml()`;
+-   summarise the output of `asreml()` using `qgm_summary()`;
+-   how to obtain estimates and standard errors for random effects using `qgm_random_effects()`;
+-   how to obtain estimates and standard errors of fixed effects and their contrasts using `qgm_fixed_linear()`;
+-   how to obtain estimates and standard errors of functions of variance components using `vpredict()`.

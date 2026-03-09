@@ -1,0 +1,334 @@
+---
+title: "Tutorial 2: Animal Model"
+author: "QGM team"
+date:  '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: 
+  html_document:
+    number_sections: TRUE
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+options(width = 128)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this tutorial we will fit an Individual (Animal) Model to the same data used in Tutorial 1, and compare the estimates obtained with those from the Sire Model. As before, we will be using Restricted Maximum Likelihood (REML) to estimate the genetic variance before obtaining the BLUP values and we will address testing hypotheses for fixed effects, e.g testing a null hypothesis that there is no difference between factor levels with an alternative that there are some differences. Reference is made to the outcomes of the Sire Model fitted to this data in Tutorial 1.
+
+## Preamble to Answers
+
+In Tutorial 2 we are looking at the Animal Model in a pedigree with 11 discrete generations (including the base), but where the only recorded information on the trait of interest is in generation 10, with all sires and dams from generation 9.
+
+# Setting up
+
+Load the libraries and the QGM helper functions. The QGM helper functions will accumulate over the course when genomics is introduced and so although the file name is different, the functions are in fact the same!
+
+```{r results='hide'}
+library("asreml")
+source("qgm_helpers_t2.R")
+```
+
+# Reading phenotypic data and pedigree
+
+The data is the same as Tutorial 1!
+
+```{r}
+tut2 <- read.csv(file="rdat1.csv",header=TRUE,na.strings=c("NA"))
+head(tut2)
+tail(tut2)
+```
+
+```{r}
+ped <- read.csv(file= "rped1.csv", header= TRUE, na.strings=c("NA"))
+head(ped)
+tail(ped)
+```
+
+# Preparing for the analysis
+
+## Declaring factors
+
+We need to define factors in the analysis. There are three factors:
+
+i)  `sex`, fixed with 1 d.f.,
+ii) `tank` fixed with 3 d.f. and
+iii) `id`, the list of identities in the pedigree which will be fitted as random effects. We do not need to define `sire` and `dam` as factors to fit the Individual (Animal) Model.
+
+```{r}
+tut2$sex <- factor(tut2$sex)
+tut2$tank <- factor(tut2$tank)
+tut2$id <- factor(tut2$id) 
+```
+
+## Distributional assumptions for random effect `id`
+
+The distributional assumptions for `id` will account for the relationships among all the individuals and will be distributed $MVN(0,V_a \mathbf{A})$ where $V_a$ is the additive genetic variance and $\mathbf{A}$ is Wright's Numerator Relationship Matrix. As in Tutorial 1, $\mathbf{A}$ and its inverse are constructed from the pedigree given in `ped`. As stated in Tutorial 1:
+
+-   only the first 3 columns are necessary but the data has a couple of extra columns that are included for use later,
+-   the pedigree file is presented in standard format: parents precede offspring (remember PQG course) and unknown parents are coded 0. The inverse needs to be calculated for analysis:
+-   note `ainv` is my choice of what we have called the inverse in the code given above, it can be called by another name.
+
+```{r}
+ainv <- ainverse(ped[,1:3]) 
+```
+
+# Fitting the Individual (Animal) Model
+
+## Running the model
+
+Now we are ready to fit the Individual (Animal) Model in `asreml()` and estimate a variance component.
+
+-   The form is very similar to the Sire Model of Tutorial 1 and has the same 4 elements: `fixed=`, `random=`, `residual=` and `data=`.
+-   For the Individual (Animal) Model we need to specify that the random term is `id` and the covariance of the breeding values, i.e. the numerator relationship matrix, is specified using `vm(id,ainv)`.
+-   The residual term has been kept as `idv(units)`, for the same reason as in Tutorial 1, to be explicit that the covariance model of the residuals is the 'identity' matrix i.e. independent and identically distributed.
+
+```{r}
+tut2.asr <- asreml(fixed= weight ~ 1 + sex + tank, random= ~ vm(id,ainv), residual= ~ idv(units), data=tut2)
+```
+
+## ... and looking at the output summary
+
+As in Tutorial 1, we use a 'qgm' function: qgm_summary() which was loaded in `qgm_helpers_t2.R`
+
+```{r}
+qgm_summary(tut2.asr)
+```
+
+### Questions 1 to 7
+
+-   Q1. Write out the model formula.
+-   $\mathbf{Answer.}$ The full model formula is $\mathbf{y} = \mathbf{1}m + \mathbf{Xb} + \mathbf{Zu} + \mathbf{e}$, where\
+    $\mathbf{y}$ is (400x1) vector of phenotypes for weight in silver carp\
+    m is a fitted mean, a scalar\
+    $\mathbf{1}$ is a (400x1) vector of 1's (the design 'matrix' for the mean)\
+    $\mathbf{b}$ is a (4x1) vector of FIXED effects with 1 d.f. for sex and 3 d.f. for tank\
+    $\mathbf{X}$ is the (400x4) design matrix for the fixed effects\
+    $\mathbf{u}$ is a (4400x1) vector of BREEDING VALUES assumed to be RANDOM with DISTRIBUTION MVN(0,$V_a \mathbf{A}$), where $\mathbf{A}$ is the NUMERATOR RELATIONSHIP MATRIX and $V_a$ is the ADDITIVE GENETIC VARIANCE\
+    $\mathbf{Z}$ is the (400x4400) design matrix for the random effects\
+    $\mathbf{e}$ is a (400x1) vector of residuals assumed to be RANDOM with DISTRIBUTION MVN(0,$V_e \mathbf{I}$), where $\mathbf{I}$ is the (400x400) Identity matrix and $V_e$ is the residual variance\
+-   Q2. Are the 3 checks on the completion of the fitting process satisfactory?
+-   $\mathbf{Answer.}$ Yes. Convergence is 'TRUE', 'bound' for the components are 'P', and the '%ch' are all 0.
+-   Q3. What does the `vm(id,ainv)` component estimate?
+-   $\mathbf{Answer.}$ The additive genetic variance.
+-   Q4. What fraction of genetic variance may be expected among sires? (A PQG question!)
+-   $\mathbf{Answer.}$ 1/4 (see Falconer & Mackay).
+-   Q5. Review the Sire Model run in Tutorial 1. The sire variance i.e. `vm(sire,ainv)` was 372.8 (s.e. 225.5): is the difference between the sire variance and the `vm(id,ainv)` component estimate a cause for concern? (No formal test is required, just a reasoned opinion!)
+-   $\mathbf{Answer.}$ The prior expectation would be that the answer from the Individual (Animal) Model will be 4 times greater - but remember the model is different using different sources of information, so it will not be a simple matter of scaling. So the estimate from the Individual (Animal) Model is 1200: divide by 4, to get 300. This value is well within the s.e. of the sire variance in the sire model. So nothing too alarming.
+-   Q6. Although the `z.ratio` cannot be used to test hypotheses on the variance components, it is indicative of the strength of evidence: why is the `z.ratio` much greater for `vm(id,ainv)` than it was for `vm(sire,ainv)`?
+-   $\mathbf{Answer.}$ The Individual (Animal) Model uses more information - on the mates of the sire, so one would expect more information, more confidence in estimate, lower s.e.
+-   Q7. In the Sire Model fitted in Tutorial 1 the residual variance was 2295. Here it is 1676: why is it much smaller?
+-   $\mathbf{Answer.}$ In the Sire Model the all the variation unexplained by the model will appear in the residual - this includes the Mendelian sampling of generation 10 and the genetic variation among their dams.
+
+## Estimates of Heritability
+
+In Tutorial 1 we looked at a simple use of `vpredict()` to estimate the phenotypic variance as the sum of the variance components i.e. $V_a + V_e$.
+
+### Questions 8 to 11
+
+-   Q8. Use `vpredict()` to re-estimate the phenotypic variance with the Individual (Animal) Model
+-   $\mathbf{Answer.}$ 2876 (s.e. 322) - from code below.
+-   Q9. Use `vpredict()` to estimate the heritability from the Individual (Animal) Model, $V_a/(V_a+V_e)$\
+-   $\mathbf{Answer.}$ 0.42 (s.e. 0.13) - from code below.
+
+```{r}
+vpredict(tut2.asr, vp ~ V1+V2)
+vpredict(tut2.asr, hh ~ V1/(V1+V2))
+```
+
+-   Q10. What would be the function used to estimate heritability from the sire variance ($V_s$) and the residual variance ($V_e$) estimated by the Sire Model in Tutorial 1.
+-   $\mathbf{Answer.}$ 4Vs/(Vs+Ve) ... remember here that in the sire model $V_e$ will certainly contain a lot of the genetic variation, so it is the 'residual variance' and not the 'environmental variance'.
+-   Q11. Would you expect the s.e. of the heritability to be larger, smaller or about the same?
+-   $\mathbf{Answer.}$ Larger! It is using less information.
+
+# Looking at the EBVs
+
+## Extract and merge EBVs
+
+The estimates obtained from fitting an Individual (Animal) Model are the 'Expected Breeding Values' or 'Estimated Breeding Values', often denoted EBVs. The EBVs can be extracted from the ASReml output using the `qgm_random_effects()` function. So use this function to get the EBVs ...
+
+```{r}
+ebv <- qgm_random_effects(tut2.asr,"id")
+head(ebv)
+tail(ebv)
+nrow(ebv)
+```
+
+It has 4400 rows as in the Sire Model! Merge this with our pedigree data.
+
+```{r}
+colnames(ebv)
+colnames(ebv)[1] <- "ebv"
+colnames(ebv)[2] <- "se"
+colnames(ebv)[4] <- "id" # rename ebv$levels as ebv$id to match with ped data frame ready for merging
+pedx <- merge(ped, ebv, by = "id")
+head(pedx)
+tail(pedx)
+```
+
+## EBVs in generation 9
+
+Look at the EBVs of generation 9, which is the generation of the parents of our data.
+
+```{r}
+hist(pedx[pedx$generation %in% c(9),]$ebv,breaks=20)
+hist(pedx[pedx$generation %in% c(9),]$se,breaks=20)
+```
+
+### Questions 12 to 14
+
+-   Q12. The EBVs in generations 9 individuals have a much greater spread than their PTAs obtained using the Sire Model? Why?
+-   $\mathbf{Answer.}$ Two reasons: (i) EBVs are on a scale that is twice that of the PTAs so the spread of values is greater, (ii) more information is used so the values are more spread. We will return to this in Lecture 5.
+-   Q13. In the histogram of prediction s.e.s there appears to be 3 subsets of precision: (i) some \~ 30.0 to 31.5, (ii) some \~ 32.0 to 34.5, and (iii) the remainder. Which individuals would you expect to find in these subsets?
+-   $\mathbf{Answer.}$ (i) are sires most information, more confidence, smaller s.e.; (ii) are dams, information less than sires, but more than those with no offspring; (iii) are those that were unselected with no offspring.
+-   Q14. Why is there variation among the s.e.s within these subsets?
+-   $\mathbf{Answer.}$ There is variation in the degree of relationships with the recorded data; e.g. unselected individuals will have a variable number of sibs selected as sires and dams.
+
+## ... then generation 10
+
+Look at ebv's of generation 10, i.e. the generation with the phenotypic data.
+
+```{r}
+hist(pedx[pedx$generation %in% c(10),]$ebv,breaks=20)
+head(pedx[pedx$generation %in% c(10),])
+```
+
+### Question 15
+
+-   Q15. Unlike the outcome of the Sire Model, full sibs now have different ebvs. Why?
+-   $\mathbf{Answer.}$ They have phenotypes and this gives information on their Mendelian Sampling Term, which is recognised in the Individual (Animal) Model but not is the Sire Model.
+
+## ... then generation 0
+
+Look at generation 0, the base generation.
+
+```{r}
+hist(pedx[pedx$generation %in% c(0),]$ebv,breaks=100)
+head(pedx)
+```
+
+### Question 16
+
+-   Q16. In generation 0, why do so many individuals have EBV precisely zero?
+-   $\mathbf{Answer.}$ With the A matrix, in generation 0, the base generation, all relationships between two distinct individuals are zero. So if they individual in the base not selected as a parent (and most were unselected) it will be unrecorded with no recorded descendent, and hence the EBV will be 0.
+
+## ... and one more scenario
+
+In generation 9 individual '3601' has NO recorded phenotype and was unselected and so has NO recorded offspring. Look at the EBV and its pedigree.
+
+```{r}
+pedx[pedx$id %in% c(3601,3593,3586),]
+```
+
+### Question 17
+
+-   Q17. How does the EBV of '3601' relate to those of its parents.
+-   $\mathbf{Answer.}$ The individual '3601' has no record with no recorded descendent, so there is no information on its Mendelian Sampling Term, so the only information on its breeding value comes from its sire and dam. The best estimate of the breeding value from the sire and dam breeding values is their average (look at the last week of PQG); therefore, the EBV is the average of the EBVs of the sire and the dam: 4.713 = (11.229 -1.803)/2.
+
+# Hypotheses testing of fixed effects in REML
+
+## The philosophy of hypothesis testing
+
+One aspect of statistics is hypothesis testing, which is the procedure which results in the statements of statistical significance seen in papers and reports. Let us first review what hypothesis testing is about.
+
+-   The first task is to define what hypotheses are being tested! These are classically the Null Hypothesis, which is usually denoted H0 and is taken as the default (or less complex) state of the world, and an Alternative Hypothesis, usually denoted H1. The test asks the question, is there evidence that the results we observe are a chance event that is 'sufficiently unusual' assuming H0 is true so that we must reject H0 in favour of H1.
+-   The term 'sufficiently unusual' is decided BEFORE the test is conducted and is the probability of a Type 1 error that is considered acceptable, i.e. an acceptable probability that we reject H0 given H0 is true. Classically three Type 1 errors probabilities are commonly used: 0.05, 0.01 or 0.001.
+-   To carry out the test a 'test statistic' is calculated which summarises the information on the hypotheses and a 'critical value' is calculated for this 'test statistic', which ensures that if the test statistic exceeds this value then H0 can be rejected in favour of H1 and the probability of Type 1 error will not exceed what is acceptable, i.e. the test statistic is sufficiently unusual.
+-   If H0 is rejected with Type 1 error = 0.05 then it is said to be statistically significant at the 5% level, or P\<0.05. Analogous statements are made for Type 1 errors 0.01 and 0.001.
+-   The critical value as well as depending on the Type 1 error is also determined in part by H1:
+    -   e.g. if H0 is 'x = 0' and the alternative H1 is 'not H0' then any value of the test statistic consistent with any large deviation from 0 in our estimate of x is evidence in favour of H1; a two-sided test as the alternative can includes both \> & \< the null.
+    -   e.g. if H0 is 'x = 0' and if H1 was more specific, say H1 is 'x \> 0', then only values of the test statistic consistent with large positive deviations in our estimate of x would lead us to reject H0 in favour of H1, NOT a large negative deviation: a one-sided test.
+-   In ANOVA or multiple regression where all effects are treated as fixed we use t-values and F-values as test statistics to test hypotheses. These rely on having an estimate of the sampling variance for the fixed effect, and we then consult tables with the appropriate degrees of freedom.
+    -   when we say t with (say) 20 d.f. it means that the sampling variance for the effect was estimated with 20 d.f., the more d.f. the more reliable is the estimate.
+-   The same idea holds for the denominator d.f. when using F-tests and t-tests to test fixed effects in REML.
+-   HOWEVER, for reasons that are beyond the scope of the course, when we use REML the d.f. for the sampling variance of the fixed effects is not obvious! Thankfully, `asreml()` helps us to overcome this with 'Wald tests', and `qgm_summary()` generates the reports automatically for us!
+
+## Wald tests
+
+The following is a repeat of what was produced by `qgm_summary()` above - do not worry about the code.
+
+```{r}
+print("WALD TESTS")
+print(as.data.frame(wald(tut2.asr,denDF="numeric",ssType="conditional")$Wald)[,c(1,2,4,6)])
+```
+
+-   The table of Wald tests can be regarded as a type of F-test with numerator d.f. (`Df`) determined by the number of d.f. for the factor, and the estimated denominator d.f. for the estimate of sampling variance d.f. (`denDF`, not integers but do not worry!).
+-   The third column in the table is `F.con` denoting F 'conditional' - and this is what we will use in QGM. It is the F-value of the factor conditional on having adjusted for all other fixed effects in the model; e.g. the F-value for `sex` after having accounted for differences between levels of `tank`.
+-   The final column is the significance calculated for the value of `F.con` with the numerator and denominator d.f. given by `Df` and `denDF` respectively FOR THE HYPOTHESES:
+    -   H0: 'there is no effect of the factor', i.e. all levels are equal as null, with alternative
+    -   H1: 'not H0', i.e. there are some differences among the factor levels.
+-   Here both factors `sex` and `tank` achieve statistical significance at P\<0.001, and the null hypothesis of them having no effect can be rejected in favour of the sexes being different from each other, and that some tanks are different from some others. These means were presented in `qgm_summary()` given above and are repeated below.
+
+```{r}
+print("FIXED EFFECTS")
+print(as.data.frame(summary(tut2.asr,coef=TRUE)$coef.fixed))
+```
+
+In summary.
+
+-   ASReml does a standard test of the fixed terms (H0: 'there is no effect of the factor' with H1: 'not H0') in the model for you.
+-   Testing of fixed effects in REML is done using Wald tests which are generated automatically here using `qgm_summary()`.
+-   Testing of FIXED effects in REML can NEVER be done by Likelihood Ratio Tests.
+-   The correct test statistic is `F.con`, conditional after accounting for all other factors in the model, with numerator and denominator d.f. given by `Df` and `denDF`, and Type 1 error (i.e. probability that we reject H0 given H0 is true) given by `Pr`.
+
+## Testing specific contrasts
+
+We will repeat the estimation of the contrast for the filtration failure in Tutorial 1, which was a contrast between the mean of Tanks 1 and the mean of Tanks 2 & 3. This used `qgm_fixed_linear()`.
+
+```{r}
+ct <- c(1.0,-0.5,-0.5,0.0)
+qgm_fixed_linear(tut2.asr,"tank",ct)
+```
+
+-   The estimate is that the breakdown caused a decrease of 28.44 (s.e. 5.81) units, very similar in magnitude to that obtained in Tutorial 1. This data is not very unbalanced in its design e.g. each full sib family has individuals of both sexes and in each of the tanks, so this is not unexpected. In unbalanced data omitting the random effects can be serious as we will see later in the course.
+-   Suppose the test is wanted of the null hypothesis H0: filtration failure had no impact, i.e. difference D = 0 with the alternative H1: D /= 0 i.e. either \>0 or \<0, with a Type 1 error of 0.05.
+-   An estimate divided by its estimated s.e. can be broadly regarded as an approximate t-test with the d.f. given by the degrees of freedom used for estimating the residual variance.This can be used to test the hypotheses here.
+-   The test statistic is 28.44/5.81 = 4.895.
+-   This is a two-sided test so the critical value for P\<0.05 is the 97.5 %-ile of the t-distribution.
+-   The d.f. for t are taken from the `denDF` column for the factor being contrasted.
+    -   for tank this is 376.9 - not an integer!
+    -   round down to 376 to be conservative - in genetics the d.f. are often large so this is rarely important
+-   Get the critical value from R below, which is 1.966, and reject H0 if the magnitude of the test statistic is \> critical value - which it is
+-   This is an 'approximate t-test'!
+
+```{r}
+qt(0.975,376,lower.tail=TRUE)
+qt(0.995,376,lower.tail=TRUE)
+qt(0.9995,376,lower.tail=TRUE)
+```
+
+Therefore we can reject the null hypothesis that the filtration failure had no impact. It would have been significant even with much more stringent Type 1 errors e.g. P\<0.001.
+
+### Question 18
+
+-   Q18. Using the output from the Individual (Animal) Model, carry out a significance test for the impact D of the calibration error in Tank 4 for the null hypothesis H0: D=0 with an alternative that it decreased weight H1: D\<0 with a Type 1 error of 0.001.
+-   $\mathbf{Answer.}$ This is a 1-sided test, with H0 rejected only if D is large and negative. The test statistic is -42.15/5.79 = -7.280. The critical value is obtained from the t-distribution with 376 d.f. is 3.112 (or -3.112) which is either the value for 0.999 (or 0.001 for -3.112). (As long as the procedure and conclusion is clear whether +ve or -ve is a matter of choice). So the evidence is strong enough to reject H0 in favour of H1. See code below.
+
+```{r}
+ct <- c(0.0,-0.5,-0.5,1.0)
+qgm_fixed_linear(tut2.asr,"tank",ct)
+qt(0.001, 376, lower.tail=TRUE)
+```
+
+# Outcomes
+
+We have covered:
+
+-   how to run an Individual (Animal) Model using `asreml()` and summarise its output using `qgm_summary()`;
+-   how to obtain EBVs and standard errors from the Individual (Animal) Model using `qgm_random_effects()`;
+-   how estimates of the Sire Model and Individual (Animal) Model may differ;
+-   how to obtain Wald tests for fixed effects of H0: 'there is no effect of the factor' with H1: 'not H0'
+-   how to test a specific contrast
+
+## Question 19
+
+-   Q19. To consolidate the outcomes of this Tutorial, re-run the Sire Model estimate the heritability and its s.e. and revisit Q10 and Q11 above.
+-   $\mathbf{Answer.}$ See code below. The estimate is 0.56 (s.e. 0.29). The assumption that the s.e. is larger is confirmed.
+
+```{r}
+tut2$sire <- factor(tut2$sire)
+tut1.asr <- asreml(fixed= weight ~ 1 + sex + tank, random= ~ vm(sire,ainv), residual= ~ idv(units), data=tut2)
+vpredict(tut1.asr, q19 ~ 4*V1/(V1+V2))
+```

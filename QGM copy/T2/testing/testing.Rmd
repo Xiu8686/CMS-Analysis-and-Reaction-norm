@@ -1,0 +1,59 @@
+---
+title: "Testing Variance Components on a Boundary"
+author: "John Woolliams"
+date:  '`r format(Sys.time(), "%H:%M:%S on %d %B, %Y")`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# setting a seed based on clock time ...
+tt <- Sys.time()
+tt <- paste0(substring(tt,19,19),substring(tt,18,18),substring(tt,16,16),substring(tt,15,15))
+set.seed(as.integer(tt))
+```
+
+When we test H0: Va = 0 against H1: Va \> 0, the problem is that a variance cannot be -ve, so H0 is on a boundary of what are feasible solutions and what are not. In any design we have a set of contrasts among the data records with expected value 0, and whose squares provide estimates of Ve+kVa for some k\>0 (label this estimate V1), and another set of contrasts among the data records with expected value 0 and whose squares provide estimates of Ve alone (label this estimate V2). Comparison of these give an estimate of Va. The test statistic for the likelihood ratio test (LRT) is the difference in the log likelihoods between the full model estimating both Va and Ve and the reduced model in which Va is fixed to 0 explicitly.
+
+Therefore assume H0 and the variance is truly 0. With H0 both these estimates will have the same expectation of Ve, but \~ half the time the V1 will be greater than V2, and \~ half the time, the V2 greater than V1. In the latter case our REML estimate of Va will be negative and REML sets this to 0 (actually a very very small +ve number) and Ve will be estimated accordingly. In such circumstances the LRT is changed since in the second case, which occurs with probability 1/2, the test statistic is always 0 as the full and reduced models are identical with Va = 0. The other half of the time, Va will be estimated as positive, due to chance and in this case the test statistic will follow chi-squared with 1 d.f.
+
+The consequence of this is that if H0 is true then the 5%, 1% and 0.1% significance levels are obtained from the upper 10% (2.706), 2% (5.412) and 0.2% (9.550) points of the chi-squared distribution with 1 d.f. For more information on this read the uploaded Visscher (2006) who clearly restates the established theory - and if you want to quote the theory the key reference is Self and Liang (1987; Journal of the American Statistical Association, 82, 605-610). This issue arises whenever H0 is on a boundary, but this is the only case we will encounter in QGM.
+
+However, we can also demonstrate this! We can set up a true case where Va = 0, simply by randomly assigning some offspring with random number phenotypes to a group of sires. Below this is done for 20 unrelated sires each with 20 offspring. This is replicated 1000 times each time testing H0: Va = 0 against H1: Va \> 0 and calculating the test statistic.
+
+```{r}
+library("asreml")
+```
+
+```{r}
+df <- data.frame(xval=numeric(400),sire=rep(1:20,times=20))
+df$sire <- factor(df$sire)
+n <- 1000
+ts <- numeric(n)
+for(i in 1:n) {
+  df$xval <- rnorm(400)
+  df.asr <- asreml(fixed= xval ~ 1, random= ~ idv(sire), residual= ~ idv(units), data= df, trace= FALSE)
+  full <- df.asr$loglik
+  df.asr <- asreml(fixed= xval ~ 1, residual= ~ idv(units), data= df, trace= FALSE)
+  red <- df.asr$loglik
+  ts[i] <- 2*(full-red)
+  if(i%%100==0) { print(paste0("Completed iteration ",i)) }
+}
+ts <- sort(ts)
+ts
+```
+
+Below we plot the histogram of the test statistic. Also shown is the empirical cumulative distribution function (cdf) of the test statistic (red line), compared to the cdf of chi-squared with 1 d.f. (grey line) and the modified cdf (blue line). The modified cdf is a much better fit, showing only a small deviation. Remember the ch-squared distribution is an asymptotic result for LRT, so we should not expect a perfect fit with 20 sires and 20 offspring per sire!
+
+```{r}
+hist(ts,breaks=40)
+hchi <- function(x) { 0.5 + 0.5*pchisq(x,1) }
+fchi <- function(x) { pchisq(x,1) }
+plot(ecdf(ts),xlim=c(0,8),ylim=c(0,1),ylab="",col="red",cex=0.2)
+par(new=TRUE)
+curve(hchi,0,8,ylim=c(0,1),ylab="",col="blue")
+par(new=TRUE)
+curve(fchi,0,8,ylim=c(0,1),ylab="",col="grey")
+```
+
+Conclusion: the modified test is important when testing H0: Va = 0!
