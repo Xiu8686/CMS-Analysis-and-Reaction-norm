@@ -143,6 +143,47 @@ pcr_pheno %>%
   ylab("Proportion")
 ```
 
+Take a look at the `mean` and `median` of `Cp_value`
+
+```{r}
+pcr_pheno %>%
+  mutate(
+    cp_mean   = rowMeans(across(c(cp_1, cp_2, cp_3)), na.rm = TRUE),
+    cp_median = apply(across(c(cp_1, cp_2, cp_3)), 1, median, na.rm = TRUE)
+  ) %>%
+  select(cp_mean, cp_median) %>%
+  pivot_longer(cols = everything(), names_to = "summary_type", values_to = "cp") %>%
+  ggplot(aes(x = cp)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30,
+                 fill = "steelblue",
+                 color = "white") +
+  geom_density(color = "red", linewidth = 1) +
+  facet_wrap(~summary_type, scales = "free") +
+  theme_bw()
+```
+
+We could see a little left skew for both mean and median value of the `Cp_value`.
+
+```{r}
+pcr_pheno %>%
+  mutate(
+    cp_mean   = rowMeans(across(c(cp_1, cp_2, cp_3)), na.rm = TRUE),
+    cp_median = apply(across(c(cp_1, cp_2, cp_3)), 1, median, na.rm = TRUE)
+  ) %>%
+  select(cp_mean, cp_median) %>%
+  pivot_longer(everything(), names_to = "trait", values_to = "cp") %>%
+  ggplot(aes(sample = cp)) +
+  stat_qq(size = 2, alpha = 0.6) +
+  stat_qq_line(color = "red", linewidth = 1) +
+  facet_wrap(~trait) +
+  theme_bw() +
+  labs(
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  )
+```
+
 ### Distribution of histopathology
 
 ```{r}
@@ -150,7 +191,28 @@ histo_pheno %>%
   select(atrium_pct_inflam, spong_pct_inflam, ratio_inflam) %>%
   pivot_longer(everything(), names_to = "trait", values_to = "value") %>%
   ggplot(aes(x = value)) +
-  geom_histogram(bins = 30, fill = "darkseagreen3", color = "white") +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30,
+                 fill = "darkgrey",
+                 color = "white") +
+  geom_density(color = "red", linewidth = 1) +
+  facet_wrap(~trait, scales = "free") +
+  theme_bw()
+```
+
+Consider the data transformation: take `log` value.
+
+```{r warning=FALSE}
+histo_pheno %>%
+  select(atrium_pct_inflam, spong_pct_inflam, ratio_inflam) %>%
+  pivot_longer(everything(), names_to = "trait", values_to = "value") %>%
+  mutate(value = log(value)) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30,
+                 fill = "darkgrey",
+                 color = "white") +
+  geom_density(color = "red", linewidth = 1) +
   facet_wrap(~trait, scales = "free") +
   theme_bw()
 ```
@@ -399,7 +461,7 @@ fam_ped %>%
   head(15)
 ```
 
-## Phenotype + Pedigree for Sire Model
+## Fitting Sire Model
 
 ```{r}
 pheno_ped %>%
