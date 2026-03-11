@@ -15,9 +15,17 @@ library(skimr)
 library(naniar)
 library(stringr)
 library(genio)
-library(asreml)
+library(here)
 
 source("function/load_functions.R")
+source(here("script", "load_script.R"))
+
+has_asreml <- requireNamespace("asreml", quietly = TRUE)
+if (has_asreml) {
+  library(asreml)
+} else {
+  message("Package 'asreml' is not available in this R session. ASReml chunks will be skipped.")
+}
 ```
 
 # File path
@@ -57,6 +65,7 @@ pcr_pheno <- read_excel(pheno_file1, sheet = "Sheet2") %>%
     cp_3 = cp_value_10
   ) %>%
   mutate(
+    sample_id = as.factor(sample_id),
     reported_result = as.factor(reported_result),
     tissue_type = as.factor(tissue_type),
     species = as.factor(species)
@@ -131,16 +140,6 @@ pcr_pheno %>%
   facet_wrap(~rep, scales = "free_y") +
   theme_bw()
 
-pcr_pheno %>%
-  ggplot(aes(x = reported_result)) +
-  geom_bar(fill = "tomato") +
-  theme_bw()
-
-pcr_pheno %>%
-  ggplot(aes(x = tissue_type, fill = reported_result)) +
-  geom_bar(position = "fill") +
-  theme_bw() +
-  ylab("Proportion")
 ```
 
 Take a look at the `mean` and `median` of `Cp_value`
@@ -183,6 +182,8 @@ pcr_pheno %>%
     y = "Sample Quantiles"
   )
 ```
+
+The normal distribution assumption seems acceptable.
 
 ### Distribution of histopathology
 
@@ -250,14 +251,9 @@ pcr_pheno %>%
     
 ```
 
-We can see that $\text{sample_ID}$ which 420500 and 418601 have abnormal $\text{cp_value}$.
+We can see that $\text{sample_ID}$ which 420500 and 418601 have abnormal $\text{cp_value}$. According to Panya's suggestion, we just treat as 0 and take the mean in the nest step.
 
-Two proposed methods:
-
-1.  change 0 to 'NA'
-2.  See reported_result as categorical variable?
-
-Now, we look at the $\text{histo_pheno}$:
+Now, we look at the $\text{histo_pheno}$ difference between two areas:
 
 ```{r}
 histo_pheno %>%
@@ -341,6 +337,16 @@ sheet1_map <- read_excel(pheno_file1, sheet = "Sheet1") %>%
   transmute(
     sample_id = as.character(sample_id),
     fish_no = suppressWarnings(as.integer(fish_no)),
+    histo_cassette_id = histo_cassette_id,
+    histo_key = if_else(
+      !is.na(histo_cassette_id),
+      paste0(
+        str_replace_all(str_extract(histo_cassette_id, "^\\d{4}/\\d{4}"), "/", "_"),
+        "_",
+        str_pad(as.integer(str_extract(histo_cassette_id, "\\d+$")), 3, pad = "0")
+      ),
+      NA_character_
+    ),
     genotyping_tube_id = genotyping_tube_id,
     animal = normalize_cms_id(animal),
     sire = normalize_cms_id(sire),
@@ -413,6 +419,92 @@ pedigree %>%
   count(YC, sort = TRUE)
 ```
 
+## Fitting Sire Model
+
+Deal with A-inverse matrix:
+
+```{r}
+ainv <- build_ainv_asreml(ped_file)
+ainv_ids <- attr(ainv, "rowNames")
+n_unique(ainv_ids)
+```
+
+```{r}
+head(pheno_ped, 500)
+nrow(pheno_ped)
+
+tail(pheno_ped, 100)
+```
+
+```{r eval=FALSE}
+# Prepare the dataset
+sire_model_dat <- pheno_ped %>%
+  mutate(
+    sire = as.character(sire),
+    cp_1_clean = na_if(cp_1, 0),
+    cp_2_clean = na_if(cp_2, 0),
+    cp_3_clean = na_if(cp_3, 0),
+    cp_mean = rowMeans(cbind(cp_1_clean, cp_2_clean, cp_3_clean), na.rm = TRUE),
+    cp_mean = if_else(is.nan(cp_mean), NA_real_, cp_mean)
+  ) %>%
+  filter(
+    !is.na(cp_mean),
+    !is.na(sire),
+    sire %in% ainv_ids
+  ) %>%
+  mutate(
+    sire = factor(sire, levels = ainv_ids)
+  )
+
+```
+
+If you run `dim(sire_model_dat)`, there are only 469 rows which because `sire %in% ainc_ids` delete some **unknown** sires in `ainv` matrix.
+
+```{r}
+dim(sire_model_dat)
+tail(sire_model_dat, 20)
+```
+
+Model:
+
+```{r}
+fit_sire <- asreml(
+  fixed = cp_mean ~ 1,
+  random = ~ vm(sire, ainv),
+  residual = ~ idv(units),
+  data = sire_model_dat
+)
+```
+
+Option model:
+
+```{r eval=FALSE}
+# Optional model: use histopathology as y and Cp as fixed covariate
+histo_model_dat <- sire_base %>%
+  left_join(
+    histo_pheno2 %>% select(id_key, atrium_pct_inflam, spong_pct_inflam, ratio_inflam),
+    by = c("histo_key" = "id_key")
+  ) %>%
+  filter(
+    !is.na(atrium_pct_inflam),
+    !is.na(cp_mean_clean),
+    !is.na(sire_final),
+    sire_final %in% ainv_ids
+  ) %>%
+  mutate(
+    sire = factor(sire_final, levels = ainv_ids)
+  )
+
+fit_inflam <- asreml(
+  fixed = atrium_pct_inflam ~ cp_mean_clean,
+  random = ~ vm(sire, Ainv),
+  residual = ~ idv(units),
+  data = histo_model_dat
+)
+```
+
+## Read Genotype file
+
 ```{r}
 # Read Plink files (bim/fam/bed)
 plink_obj <- read_plink(tools::file_path_sans_ext(bed_file))
@@ -459,91 +551,6 @@ fam_ped %>%
 fam_ped %>%
   count(sibgroup, sort = TRUE) %>%
   head(15)
-```
-
-## Fitting Sire Model
-
-```{r}
-pheno_ped %>%
-  summarise(
-    n_records = n(),
-    n_with_animal = sum(!is.na(animal)),
-    n_with_sire = sum(!is.na(sire)),
-    n_with_dam = sum(!is.na(dam)),
-    n_animal_in_pedigree = sum(animal %in% pedigree$id, na.rm = TRUE),
-    n_sire_in_pedigree = sum(sire %in% pedigree$id, na.rm = TRUE),
-    n_dam_in_pedigree = sum(dam %in% pedigree$id, na.rm = TRUE)
-  )
-```
-
-```{r}
-sire_model_dat <- pheno_ped %>%
-  mutate(
-    # Treat 0 as missing for Cp replicate values before averaging
-    cp_1_clean = na_if(cp_1, 0),
-    cp_2_clean = na_if(cp_2, 0),
-    cp_3_clean = na_if(cp_3, 0),
-    cp_mean_clean = rowMeans(cbind(cp_1_clean, cp_2_clean, cp_3_clean), na.rm = TRUE),
-    cp_mean_clean = if_else(is.nan(cp_mean_clean), NA_real_, cp_mean_clean),
-
-    # Keep only sires that can be mapped into pedigree
-    sire = if_else(sire %in% pedigree$id, sire, NA_character_),
-    tissue_type = as.factor(tissue_type),
-    test_replicate = as.factor(test_replicate)
-  ) %>%
-  filter(!is.na(cp_mean_clean), !is.na(sire))
-
-sire_model_dat %>%
-  summarise(
-    n_records = n(),
-    n_sires = n_distinct(sire),
-    cp_mean_mean = mean(cp_mean_clean),
-    cp_mean_sd = sd(cp_mean_clean)
-  )
-
-sire_model_dat %>%
-  count(sire, sort = TRUE) %>%
-  head(15)
-```
-
-```{r eval=FALSE}
-# ASReml sire model
-
-ped_asreml <- pedigree %>%
-  transmute(
-    animal = id,
-    sire = if_else(is.na(sire), "0", sire),
-    dam = if_else(is.na(dam), "0", dam)
-  )
-
-Ainv <- ainverse(ped_asreml)
-
-fit_sire <- asreml(
-  fixed = cp_mean_clean ~ tissue_type + test_replicate,
-  random = ~ vm(sire, Ainv),
-  residual = ~ idv(units),
-  data = sire_model_dat,
-  na.method.X = "include",
-  na.method.Y = "omit"
-)
-
-summary(fit_sire)$varcomp
-summary(fit_sire, coef = TRUE)$coef.fixed
-summary(fit_sire, coef = TRUE)$coef.random
-```
-
-```{r eval=FALSE}
-# Simpler fallback if you want sire as IID random effect (without pedigree relationship)
-fit_sire_iid <- asreml(
-  fixed = cp_mean_clean ~ tissue_type + test_replicate,
-  random = ~ sire,
-  residual = ~ idv(units),
-  data = sire_model_dat,
-  na.method.X = "include",
-  na.method.Y = "omit"
-)
-
-summary(fit_sire_iid)$varcomp
 ```
 
 ## Genotype QC Summary
