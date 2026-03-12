@@ -476,6 +476,49 @@ fit_sire <- asreml(
 )
 ```
 
+```{r}
+qgm_model_summary(fit_sire)
+```
+
+From the result, we can see the model converged and `log-likelihood` stabilized at `-724` .
+
+#### **Variance Components:** 
+
+`vm(sire,ainv)` is the estimate of sire variance components and residual is estimated by `units!units`.
+
+#### **Fixed effect:** 
+
+Only Intercept effect.
+
+#### Predicted Transmitting Abilities/PTAs:
+
+The estimates obtained from fitting a Sire Model are the predicted superiority or inferiority of the offspring of the sires, these are called **Predicted Transmitting Abilities** or PTAs.
+
+```{r warning=FALSE}
+pta <- qgm_random_effects_pta(fit_sire, "sire")
+head(pta, 30)
+tail(pta, 30)
+```
+
+#### Merge PTAs with whole pedigree information
+
+```{r}
+colnames(pta)[1] <- "pta"
+colnames(pta)[2] <- "se"
+colnames(pta)[4] <- "id" # rename pta$levels as pta$id to match with ped data frame ready for merging
+pedx <- merge(pedigree, pta, by = "id")
+head(pedx, 200)
+```
+
+```{r}
+unique(pedx$sibgroup)
+# PTA 
+hist(pedx[pedx$sibgroup %in% "S1CBN",]$pta,breaks=20)
+hist(pedx[pedx$sibgroup %in% "S1CBI",]$pta,breaks=20)
+hist(pedx[pedx$sibgroup %in% "S1ICM",]$pta,breaks=20)
+
+```
+
 Option model:
 
 ```{r eval=FALSE}

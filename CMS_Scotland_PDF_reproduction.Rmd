@@ -1,0 +1,620 @@
+---
+title: "Attempted Reproduction of Scotland CMS PDF Analyses"
+author: "Junxiu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+params:
+  run_heavy_steps: false
+  n_replicates: 100
+  n_candidates: 700
+---
+
+# Scope
+
+This notebook is an **attempted reproduction** of the PDF:
+
+-   `ScotlandCMS_ISGA_PSLv4_MB.pdf`
+
+It follows the same structure:
+
+1.  Validation with qPCR / histopathology
+2.  qPCR GWAS
+3.  Simulation of selection response (qPCR index, histopathology index, combined index)
+
+Because the PDF does not include all implementation details (for example, exact model formulas and all QC thresholds), some parts are reconstructed with explicit assumptions.
+
+# Setup
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+
+set.seed(20260312)
+run_heavy_steps <- isTRUE(params$run_heavy_steps)
+```
+
+```{r packages}
+required_pkgs <- c(
+  "tidyverse",
+  "readxl",
+  "janitor",
+  "stringr",
+  "genio",
+  "MASS",
+  "Matrix"
+)
+
+missing_pkgs <- required_pkgs[
+  !vapply(required_pkgs, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(missing_pkgs) > 0) {
+  stop(
+    "Missing packages: ", paste(missing_pkgs, collapse = ", "),
+    "\nPlease install them before knitting."
+  )
+}
+
+invisible(lapply(required_pkgs, library, character.only = TRUE))
+```
+
+# File Paths
+
+```{r paths}
+# Phenotype
+pheno_file1 <- file.path(
+  "data", "phenotype",
+  "CMS challenge Scotland 22G BE20041B sample IDs_with PCR11102022.xlsx"
+)
+pheno_file2 <- file.path(
+  "data", "phenotype",
+  "Data - CMS MOWI genetics project Scotland.xlsx"
+)
+
+# Pedigree
+ped_file <- file.path("data", "pedigree", "pedigree22G_CMSSalmoStrong.txt")
+
+# Genotype
+bed_file <- file.path("data", "genotype", "2022CMSGeno_SalmoStrong.bed")
+bim_file <- file.path("data", "genotype", "2022CMSGeno_SalmoStrong.bim")
+fam_file <- file.path("data", "genotype", "2022CMSGeno_SalmoStrong.fam")
+plink_prefix <- tools::file_path_sans_ext(bed_file)
+```
+
+# Helper Functions
+
+```{r helpers}
+numify <- function(x) suppressWarnings(as.numeric(x))
+
+normalize_cms_id <- function(x) {
+  x <- as.character(x)
+  x[x %in% c("", "NA", "NaN", "0", "2")] <- NA_character_
+
+  # Some IDs in the workbook have missing zero blocks.
+  x <- sub("^2022IRS1ICMFR", "2022IRS1ICM00FR", x)
+  x <- sub("^2018IRS1CBN([0-9]{5}[A-Z][0-9]{2})$", "2018IRS1CBN0000\\1", x)
+  x
+}
+
+build_histo_key_from_cassette <- function(x) {
+  x <- as.character(x)
+  has_prefix <- !is.na(x) & stringr::str_detect(x, "^\\d{4}/\\d{4}")
+
+  out <- rep(NA_character_, length(x))
+  out[has_prefix] <- paste0(
+    stringr::str_replace_all(stringr::str_extract(x[has_prefix], "^\\d{4}/\\d{4}"), "/", "_"),
+    "_",
+    stringr::str_pad(as.integer(stringr::str_extract(x[has_prefix], "\\d+$")), width = 3, pad = "0")
+  )
+  out
+}
+
+build_histo_key_from_histo_id <- function(x) {
+  x <- as.character(x)
+  paste0(
+    stringr::str_extract(x, "\\d{4}_\\d{4}"),
+    "_",
+    stringr::str_pad(as.integer(stringr::str_extract(x, "(?<=_)\\d+(?=\\s*\\()")), width = 3, pad = "0")
+  )
+}
+
+safe_cv <- function(x) {
+  100 * sd(x, na.rm = TRUE) / mean(x, na.rm = TRUE)
+}
+```
+
+# Data Import
+
+```{r import}
+sheet1 <- readxl::read_excel(pheno_file1, sheet = "Sheet1") %>%
+  janitor::clean_names()
+
+sheet2 <- readxl::read_excel(pheno_file1, sheet = "Sheet2") %>%
+  janitor::clean_names()
+
+histo_raw <- readxl::read_excel(pheno_file2, sheet = "Scotland samples", skip = 1) %>%
+  janitor::clean_names()
+
+pedigree <- readr::read_table2(ped_file) %>%
+  mutate(
+    sire = na_if(as.character(sire), "0"),
+    dam = na_if(as.character(dam), "0")
+  )
+
+fam <- readr::read_table2(
+  fam_file,
+  col_names = c("fid", "iid", "pid", "mid", "sex", "plink_pheno")
+)
+
+bim <- readr::read_table2(
+  bim_file,
+  col_names = c("chr", "snp", "cm", "bp", "a1", "a2")
+)
+```
+
+# Rebuild Validation Dataset
+
+```{r phenotypes}
+# qPCR from Sheet1 (used for ID linkage to genotype).
+pheno_qpcr <- sheet1 %>%
+  transmute(
+    id = normalize_cms_id(animal),
+    cp_1 = numify(cp_value_12),
+    cp_2 = numify(cp_value_13),
+    cp_3 = numify(cp_value_14)
+  ) %>%
+  distinct(id, .keep_all = TRUE) %>%
+  mutate(
+    cp_1 = na_if(cp_1, 0),
+    cp_2 = na_if(cp_2, 0),
+    cp_3 = na_if(cp_3, 0),
+    ct = rowMeans(cbind(cp_1, cp_2, cp_3), na.rm = TRUE),
+    ct = if_else(is.nan(ct), NA_real_, ct)
+  )
+
+# qPCR from Sheet2 (used to align with sample_id records from challenge batch).
+pcr_sheet2 <- sheet2 %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    cp_1 = numify(cp_value_8),
+    cp_2 = numify(cp_value_9),
+    cp_3 = numify(cp_value_10),
+    ct = rowMeans(cbind(cp_1, cp_2, cp_3), na.rm = TRUE),
+    ct = if_else(is.nan(ct), NA_real_, ct)
+  )
+
+# Mapping table from sample_id to breeding IDs and histopathology key.
+sample_map <- sheet1 %>%
+  transmute(
+    sample_id = as.character(sample_id),
+    id = normalize_cms_id(animal),
+    sire = normalize_cms_id(sire),
+    dam = normalize_cms_id(dam),
+    histo_key = build_histo_key_from_cassette(histo_cassette_id)
+  ) %>%
+  distinct(sample_id, .keep_all = TRUE)
+
+# Histopathology table.
+pheno_histo <- histo_raw %>%
+  transmute(
+    histo_id = as.character(id),
+    histo_key = build_histo_key_from_histo_id(id),
+    atrium_pct_inflam = numify(percentage_inflammation),
+    spong_pct_inflam = numify(precentage_inflammation),
+    ratio_inflam = numify(ratio_inflammation_atrium_spongiosum)
+  )
+
+# Main validation dataset (qPCR + histopathology overlap through sample map).
+validation_dat <- pcr_sheet2 %>%
+  left_join(sample_map, by = "sample_id") %>%
+  inner_join(pheno_histo, by = "histo_key")
+```
+
+```{r summary_stats}
+qpcr_summary <- pheno_qpcr %>%
+  summarise(
+    n = sum(!is.na(ct)),
+    mean = mean(ct, na.rm = TRUE),
+    sd = sd(ct, na.rm = TRUE),
+    min = min(ct, na.rm = TRUE),
+    max = max(ct, na.rm = TRUE),
+    cv_percent = safe_cv(ct)
+  )
+
+histo_summary <- pheno_histo %>%
+  summarise(
+    n = n(),
+    atrium_mean = mean(atrium_pct_inflam, na.rm = TRUE),
+    atrium_sd = sd(atrium_pct_inflam, na.rm = TRUE),
+    spong_mean = mean(spong_pct_inflam, na.rm = TRUE),
+    spong_sd = sd(spong_pct_inflam, na.rm = TRUE)
+  )
+
+overlap_summary <- validation_dat %>%
+  summarise(
+    n_overlap = n(),
+    cor_ct_ratio = cor(ct, ratio_inflam, use = "pairwise.complete.obs"),
+    cor_ct_atrium = cor(ct, atrium_pct_inflam, use = "pairwise.complete.obs"),
+    cor_ct_spong = cor(ct, spong_pct_inflam, use = "pairwise.complete.obs")
+  )
+
+qpcr_summary
+histo_summary
+overlap_summary
+```
+
+```{r basic_plots}
+pheno_qpcr %>%
+  ggplot(aes(x = ct)) +
+  geom_histogram(bins = 35, fill = "#2C7FB8", color = "white") +
+  labs(
+    title = "Distribution of qPCR CT (Sheet1)",
+    x = "CT value",
+    y = "Count"
+  ) +
+  theme_bw()
+
+validation_dat %>%
+  ggplot(aes(x = ct, y = ratio_inflam)) +
+  geom_point(alpha = 0.6, color = "#1D3557") +
+  geom_smooth(method = "lm", se = TRUE, color = "#E63946") +
+  labs(
+    title = "qPCR CT vs Histopathology Inflammation Ratio",
+    x = "qPCR CT",
+    y = "Inflammation ratio (atrium/spongiosum)"
+  ) +
+  theme_bw()
+```
+
+# Pedigree and Genotype Coverage
+
+```{r coverage}
+family_counts <- sample_map %>%
+  filter(!is.na(sire), !is.na(dam)) %>%
+  count(sire, dam, name = "n_offspring")
+
+coverage_table <- tibble(
+  metric = c(
+    "Pedigree individuals",
+    "Genotyped individuals (.fam)",
+    "SNP markers (.bim)",
+    "qPCR records with normalized breeding ID",
+    "Genotyped + qPCR overlap",
+    "Observed sire-dam families in mapped samples"
+  ),
+  value = c(
+    nrow(pedigree),
+    nrow(fam),
+    nrow(bim),
+    sum(!is.na(pheno_qpcr$id) & !is.na(pheno_qpcr$ct)),
+    sum(fam$iid %in% pheno_qpcr$id[!is.na(pheno_qpcr$ct)]),
+    nrow(family_counts)
+  )
+)
+
+coverage_table
+```
+
+# Optional: Heritability Models (ASReml)
+
+```{r asreml_example, eval=FALSE}
+# This chunk is optional because ASReml requires a separate licensed installation.
+# The model structure mirrors the pedigree/genomic heritability idea in the PDF.
+
+library(asreml)
+
+sire_dat <- sample_map %>%
+  select(id, sire) %>%
+  left_join(pheno_qpcr %>% select(id, ct), by = "id") %>%
+  filter(!is.na(ct), !is.na(sire))
+
+fit_sire <- asreml(
+  fixed = ct ~ 1,
+  random = ~ sire,
+  residual = ~ idv(units),
+  data = sire_dat
+)
+
+summary(fit_sire)$varcomp
+```
+
+# Optional Heavy Step: GWAS on qPCR CT
+
+```{r gwas}
+if (!run_heavy_steps) {
+  cat("GWAS is skipped. Set params$run_heavy_steps = TRUE to run it.\n")
+} else {
+  matched <- fam %>%
+    mutate(row_index = row_number()) %>%
+    transmute(id = iid, row_index) %>%
+    left_join(pheno_qpcr %>% select(id, ct), by = "id") %>%
+    filter(!is.na(ct))
+
+  # Read genotype matrix (SNP x individual).
+  plink_obj <- genio::read_plink(plink_prefix)
+  G <- plink_obj$X[, matched$row_index, drop = FALSE]
+  y <- matched$ct
+
+  # Mean-impute missing genotypes per SNP.
+  row_sum <- rowSums(G, na.rm = TRUE)
+  row_obs <- rowSums(!is.na(G))
+  row_mu <- row_sum / pmax(row_obs, 1)
+  na_pos <- which(is.na(G), arr.ind = TRUE)
+  if (nrow(na_pos) > 0) {
+    G[na_pos] <- row_mu[na_pos[, 1]]
+  }
+
+  # Fast single-SNP linear test y ~ SNP (no additional covariates).
+  n <- length(y)
+  y_mean <- mean(y)
+  y_ss <- sum((y - y_mean)^2)
+  sx <- rowSums(G)
+  sx2 <- rowSums(G * G)
+  sxy <- as.vector(G %*% y)
+  sxx <- sx2 - (sx^2 / n)
+  sxy_center <- sxy - (sx * y_mean)
+
+  r <- sxy_center / sqrt(sxx * y_ss)
+  r[!is.finite(r)] <- 0
+  t_stat <- r * sqrt((n - 2) / pmax(1e-12, 1 - r^2))
+  p_val <- 2 * pt(-abs(t_stat), df = n - 2)
+  beta <- sxy_center / sxx
+
+  gwas_results <- tibble(
+    chr = bim$chr,
+    snp = bim$snp,
+    bp = bim$bp,
+    beta = beta,
+    p = p_val
+  ) %>%
+    arrange(p)
+
+  dir.create("output", showWarnings = FALSE)
+  readr::write_csv(gwas_results, file.path("output", "cms_qpcr_gwas_results.csv"))
+
+  cat("GWAS finished. Results saved to output/cms_qpcr_gwas_results.csv\n")
+  head(gwas_results, 15)
+}
+```
+
+```{r gwas_followup}
+if (exists("gwas_results")) {
+  best_chr12 <- gwas_results %>% filter(chr == "12") %>% slice_min(order_by = p, n = 1)
+  best_chr27 <- gwas_results %>% filter(chr == "27") %>% slice_min(order_by = p, n = 1)
+
+  best_chr12
+  best_chr27
+
+  # Estimate variance explained by the top SNP.
+  top_snp <- gwas_results$snp[1]
+  snp_idx <- match(top_snp, bim$snp)
+  x <- plink_obj$X[snp_idx, matched$row_index]
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  fit_top <- lm(y ~ x)
+  tibble(
+    top_snp = top_snp,
+    beta = unname(coef(fit_top)[2]),
+    r_squared = summary(fit_top)$r.squared
+  )
+}
+```
+
+# Simulation of Selection Response
+
+```{r simulation_helpers}
+build_genetic_cov <- function(h2, vp, rho_qh, rho_qs, rho_hs) {
+  va <- h2 * vp
+  R <- matrix(
+    c(
+      1, rho_qh, rho_qs,
+      rho_qh, 1, rho_hs,
+      rho_qs, rho_hs, 1
+    ),
+    nrow = 3, byrow = TRUE
+  )
+
+  G <- diag(sqrt(va)) %*% R %*% diag(sqrt(va))
+  as.matrix(Matrix::nearPD(G)$mat)
+}
+
+simulate_selection <- function(
+  index_name = c("I1_qPCR", "I2_histopathology", "I3_index"),
+  n_rep = 100,
+  n_generations = 10,
+  n_families = 200,
+  offspring_per_family = 20,
+  n_candidates = 700,
+  means = c(qPCR_CT = 27, Histopathology = 1.95, Survival = 0.90),
+  h2 = c(qPCR_CT = 0.45, Histopathology = 0.45, Survival = 0.20),
+  vp = c(qPCR_CT = 10, Histopathology = 0.8, Survival = 1),
+  accuracies = c(qPCR_CT = 0.7, Histopathology = 0.8, Survival = 0.5),
+  rho_qh = -0.8,
+  rho_qs = 0.5,
+  rho_hs = -0.6,
+  seed = 1
+) {
+  index_name <- match.arg(index_name)
+  set.seed(seed)
+
+  G <- build_genetic_cov(h2, vp, rho_qh, rho_qs, rho_hs)
+  va <- diag(G)
+  err_sd <- sqrt(va * (1 / accuracies^2 - 1))
+
+  n_sires <- n_families / 2
+  n_dams <- n_families
+  n_offspring <- n_families * offspring_per_family
+  out <- vector("list", n_rep)
+
+  for (r in seq_len(n_rep)) {
+    # Initial candidate pool.
+    tbv <- MASS::mvrnorm(n = n_candidates, mu = rep(0, 3), Sigma = G)
+    rec <- matrix(NA_real_, nrow = n_generations + 1, ncol = 3)
+    rec[1, ] <- colMeans(tbv)
+
+    for (g in seq_len(n_generations)) {
+      n <- nrow(tbv)
+      sex <- sample(c("M", "F"), size = n, replace = TRUE)
+
+      # Build EBV from TBV and target accuracy.
+      ebv <- tbv + matrix(rnorm(n * 3), nrow = n, ncol = 3) %*% diag(err_sd)
+
+      # Define selection score for each index.
+      score <- switch(
+        index_name,
+        I1_qPCR = ebv[, 1],                                  # high CT is better
+        I2_histopathology = -ebv[, 2],                       # low histopathology is better
+        I3_index = as.numeric(scale(ebv[, 1]) - scale(ebv[, 2])) # combined index
+      )
+
+      male_idx <- which(sex == "M")
+      female_idx <- which(sex == "F")
+      if (length(male_idx) < n_sires || length(female_idx) < n_dams) {
+        sex <- sample(rep(c("M", "F"), length.out = n))
+        male_idx <- which(sex == "M")
+        female_idx <- which(sex == "F")
+      }
+
+      sires <- male_idx[order(score[male_idx], decreasing = TRUE)][seq_len(n_sires)]
+      dams <- female_idx[order(score[female_idx], decreasing = TRUE)][seq_len(n_dams)]
+
+      # Nested mating: 1 sire mates with 2 dams.
+      offspring_tbv <- matrix(NA_real_, nrow = n_offspring, ncol = 3)
+      row_ptr <- 1L
+      for (s in seq_len(n_sires)) {
+        dams_this_sire <- dams[((2 * s) - 1):(2 * s)]
+        for (d in dams_this_sire) {
+          mid_parent <- matrix(
+            (tbv[sires[s], ] + tbv[d, ]) / 2,
+            nrow = offspring_per_family,
+            ncol = 3,
+            byrow = TRUE
+          )
+          mendelian <- MASS::mvrnorm(
+            n = offspring_per_family,
+            mu = rep(0, 3),
+            Sigma = 0.5 * G
+          )
+          offspring_tbv[row_ptr:(row_ptr + offspring_per_family - 1), ] <- mid_parent + mendelian
+          row_ptr <- row_ptr + offspring_per_family
+        }
+      }
+
+      rec[g + 1, ] <- colMeans(offspring_tbv)
+
+      # Keep a limited candidate set for the next generation.
+      keep <- sample.int(n_offspring, size = n_candidates, replace = FALSE)
+      tbv <- offspring_tbv[keep, , drop = FALSE]
+    }
+
+    out[[r]] <- tibble(
+      generation = 0:n_generations,
+      replicate = r,
+      index = index_name,
+      qPCR_CT = means["qPCR_CT"] + rec[, 1],
+      Histopathology = pmax(0, means["Histopathology"] + rec[, 2]),
+      Survival = pmin(1, pmax(0, means["Survival"] + rec[, 3]))
+    )
+  }
+
+  bind_rows(out) %>%
+    pivot_longer(cols = c(qPCR_CT, Histopathology, Survival), names_to = "trait", values_to = "value")
+}
+```
+
+```{r simulation_run}
+indices <- c("I1_qPCR", "I2_histopathology", "I3_index")
+
+sim_results <- purrr::map_dfr(
+  indices,
+  ~ simulate_selection(
+    index_name = .x,
+    n_rep = params$n_replicates,
+    n_candidates = params$n_candidates,
+    seed = 100 + match(.x, indices)
+  )
+)
+
+sim_summary <- sim_results %>%
+  group_by(index, generation, trait) %>%
+  summarise(
+    mean = mean(value),
+    p10 = quantile(value, 0.10),
+    p90 = quantile(value, 0.90),
+    .groups = "drop"
+  )
+
+sim_summary %>%
+  filter(generation %in% c(0, 3, 6, 10)) %>%
+  arrange(trait, index, generation)
+```
+
+```{r simulation_plot}
+sim_summary %>%
+  ggplot(aes(x = generation, y = mean, color = index, fill = index)) +
+  geom_ribbon(aes(ymin = p10, ymax = p90), alpha = 0.14, color = NA) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~trait, scales = "free_y", ncol = 1) +
+  labs(
+    title = "Simulated response to selection under three indices",
+    x = "Generation",
+    y = "Trait mean",
+    color = "Index",
+    fill = "Index"
+  ) +
+  theme_bw()
+```
+
+# Sensitivity Analysis
+
+```{r sensitivity}
+sensitivity_reps <- if (run_heavy_steps) params$n_replicates else min(30, params$n_replicates)
+
+scenarios <- tribble(
+  ~scenario, ~rho_qh, ~rho_qs, ~rho_hs,
+  "Base", -0.8,  0.5, -0.6,
+  "Moderate_qh", -0.6, 0.5, -0.6,
+  "Lower_qs", -0.8, 0.3, -0.6,
+  "Lower_hs", -0.8, 0.5, -0.4
+)
+
+sensitivity_results <- purrr::pmap_dfr(
+  scenarios,
+  function(scenario, rho_qh, rho_qs, rho_hs) {
+    purrr::map_dfr(
+      c("I1_qPCR", "I2_histopathology", "I3_index"),
+      ~ simulate_selection(
+        index_name = .x,
+        n_rep = sensitivity_reps,
+        n_candidates = params$n_candidates,
+        rho_qh = rho_qh,
+        rho_qs = rho_qs,
+        rho_hs = rho_hs,
+        seed = 1000 + match(.x, c("I1_qPCR", "I2_histopathology", "I3_index"))
+      ) %>%
+        mutate(scenario = scenario)
+    )
+  }
+)
+
+sensitivity_g3 <- sensitivity_results %>%
+  filter(generation == 3) %>%
+  group_by(scenario, index, trait) %>%
+  summarise(mean_g3 = mean(value), .groups = "drop")
+
+sensitivity_g3
+```
+
+# Interpretation Notes
+
+-   This notebook reproduces the **workflow logic** from the PDF with available local data.
+-   The qPCR GWAS usually shows a strong chr27 signal and a secondary chr12 signal in this dataset.
+-   Simulation outputs are sensitive to assumptions not fully specified in the PDF (especially candidate pool size and index construction), so treat numeric agreement as approximate.
+-   For closer replication, replace the simplified GWAS and simulation assumptions with the original internal script/model settings if available.
